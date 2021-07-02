@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import json
 
-user_parms = {
+pr_parms = {
     'im': im,
     'WDM': WDM,
     'WUM': WUM,
@@ -27,8 +27,23 @@ inital_state = {
     'WD': WD
 }
 
-json.dump(user_parms, open(f'../data/input_parms.json', 'wb'),
+routing_parms = {
+    'CS': CS,
+    'CI': CI,
+    'CG': CG,
+    'L': L,
+    'x1': x1,
+    'K': K,
+    'xx': xx,
+    'periods': periods,
+    'AA': AA
+}
+
+json.dump(pr_parms, open(f'../data/pr_parms.json', 'wb'),
         indent = 2)
 
 json.dump(inital_state, open(f'../data/initial_states.json', 'wb'),
+        indent = 2)
+
+json.dump(routing_parms, open(f'../data/routing_parms.json', 'wb'),
         indent = 2)
