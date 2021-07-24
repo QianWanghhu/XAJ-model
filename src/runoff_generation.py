@@ -9,24 +9,24 @@ def read_parms(f_parms, f_initials):
     print('================Load the required initial state variables===============')
     initial_states = json.load(open(f_initials, 'rb'))
     # read parameter values
-    im = user_parms['im']
-    WDM = user_parms['WDM']
-    WUM = user_parms['WUM']
-    WLM = user_parms['WLM']
-    SM = user_parms['SM']
-    b = user_parms['b']
-    EX = user_parms['EX']
-    kc = user_parms['kc']
-    C = user_parms['C']
-    KI = user_parms['KI']
-    KG = user_parms['KG']
+    im = user_parms['im'] 
+    WDM = user_parms['WDM'] # 深层土壤水含水容量
+    WUM = user_parms['WUM'] # 上层土壤水含水容量
+    WLM = user_parms['WLM'] # 下层土壤水含水容量
+    SM = user_parms['SM'] # 流域平均自由水蓄积容量
+    b = user_parms['b'] # 反映流域包气带蓄水容量分布的不均匀性
+    EX = user_parms['EX'] # 自由水蓄量分布曲线指数
+    kc = user_parms['kc'] # 蒸发折算系数
+    C = user_parms['C'] # 蒸发扩散系数
+    KI = user_parms['KI'] # 壤中流出流系数
+    KG = user_parms['KG'] # 地下径流出流系数
 
     # read initial states
-    S0 = initial_states['S0']
-    FR0 = initial_states['FR0']
-    WU = initial_states['WU']
-    WL = initial_states['WL']
-    WD = initial_states['WD']
+    S0 = initial_states['S0'] #自由水蓄水库初始需水量
+    FR0 = initial_states['FR0'] #初始产流面积
+    WU = initial_states['WU'] # 上层土壤含水量
+    WL = initial_states['WL'] # 下层土壤含水量
+    WD = initial_states['WD'] # 深层土壤含水量
     return S0, FR0, im, WDM, WUM, WLM, SM, b, EX, kc, C, KI,  KG, WU, WL, WD
 
 
@@ -47,8 +47,6 @@ def soil_variable(WLM, WUM, WDM, WU, WL, WD, S0, SM):
     """
     Analyze the inputs for soil water to make sure that the input variables are of consistence.
     """
-    # user_parms = json.load(open(f'../data/input_parms.json', 'rb'))
-    # WM, WMM, MS, EP, KIt, KGt, KI, KG  = calculate_capacities(user_parms)
 
     if WU > WUM:
         WL = WL + WU - WUM
@@ -109,6 +107,7 @@ def runoff_single_time(PEt, im, WMM, W0, WM, b):
     Rbt: runoff at the impervious area.
     Rt: runoff generated in the pervious region.
     """
+    assert PEt >= 0, "The net precipitation at t time is non-negative."
     if PEt > 0:
         Rbt = im * PEt   #不透水面积产流
         a_t = WMM * (1.0 - (1.0 - W0 / WM) ** (1.0 / (1.0 + b))) #W0对应的纵坐标
@@ -126,17 +125,20 @@ def runoff_single_time(PEt, im, WMM, W0, WM, b):
 
 def separate_source(Rt, PEt, S0t, FR0t, KI, KG, MS, EX):
     RS, RI, RG = 0.0, 0.0, 0.0
+
+    assert Rt >= 0, "The runoff at t time cannot be negative."
+
     if Rt > 0:
         FRt = Rt / PEt
         S = S0t * FR0t / FRt
         QD = Rt / FRt
-        N = np.floor(QD / 5) + 1 # 将每个计算时段的入流R，按5mm分成N段
+        N = int(np.floor(QD / 5) + 1) # 将每个计算时段的入流R，按5mm分成N段
         KIt = (1.0 - (1.0 - KI - KG)**(1.0 / (N * 1.0))) / (1.0 + KG / KI)
         KGt = KG * KIt / KI
         QD = QD / N
         SMM1 = MS
-        SM1=SMM1 / (1.0 + EX)
-        SS=S
+        SM1 = SMM1 / (1.0 + EX)
+        SS = S
 
         for i in range(N):
             if (S > SM1):
@@ -160,7 +162,8 @@ def separate_source(Rt, PEt, S0t, FR0t, KI, KG, MS, EX):
 
             if S < 0: S = 0.0
         # END for
-        S0t = S, FR0t = FRt
+        S0t = S
+        FR0t = FRt
     else:
         RG = S0t * KG * FR0t
         RI = S0t * KI * FR0t
@@ -230,6 +233,9 @@ def runoff_production(P, E, S0, FR0, im, WDM, WUM, WLM, SM, b, EX, kc, C, KI,  K
     WL1[0], WD1[0], WU1[0] = WL, WU, WD
     RSS[0]=0.0; RII[0]=0.0; RGG[0]=0.0
 
+    e_list = np.zeros(P.shape[0])
+    R_list =  np.zeros(P.shape[0])
+    Rb_list =  np.zeros(P.shape[0])
     for t in range(1, P.shape[0]):
         W0 = WL + WU + WD  # t时段的初始土壤含水量
         if (W0 > WM): W0 = WM
@@ -239,21 +245,28 @@ def runoff_production(P, E, S0, FR0, im, WDM, WUM, WLM, SM, b, EX, kc, C, KI,  K
             EU, EL, ED = soil_evpa(P[t], EP[t], WU, WL, WD, C, WLM)
             UE = EU + ED + EL
             PE = P[t] - UE #扣除蒸发的净雨
+            e_list[t] = UE
         else:
-            PE = P[t] -EP[t]
+            PE = P[t] - EP[t]
+            e_list[t] = EP[t]
 
-        if PE < 0: PE = 0.0
+        # correct the precipitation data by setting the negative values to zero
+        if PE < 0: 
+            PE = 0.0
 
         # 流域产流蓄满产流
         Rb, R = runoff_single_time(PE, im, WMM, W0, WM, b)
+        R_list[t] = R
+        Rb_list[t] = Rb
         if (np.abs(R) < 1E-10): R = 0.0
+
+        Rb+R+e_list[1]+ WU+WL+WD-50
 
         # UPDATE SOIL WATER
         if PE > 0:
             WU, WL, WD = update_soil_state(PE, WU, WL, WD, R, WUM, WLM, WDM, W0)
 
         # 分水源
-        # TO　ADD　separate_source()
         RS, RI, RG, S0, FR0 = separate_source(R, PE, S0, FR0, KI, KG, MS, EX)
 
         RS = Rb + RS * (1.0 - im)
@@ -267,23 +280,11 @@ def runoff_production(P, E, S0, FR0, im, WDM, WUM, WLM, SM, b, EX, kc, C, KI,  K
         RII[t] = RI
         RGG[t] = RG
 
-    return RSS, RII, RGG
+    return RSS, RII, RGG, e_list, WU1, WL1, WD1, R_list, Rb_list
     # END runoff_production()
 
-
-def read_inputs(fn):
-    """
-    Read the input of P, E
-    """
-    print('================Load the required input data===============')
-    PE_inputs = np.loadtxt(fn, skiprows=1, usecols=[1, 2])
-    P, E = PE_inputs[:, 0], PE_inputs[:, 1]
-
-    return P, E
-
-def save_runoff(fn, f_parms, f_initials, runoff_file):
+def save_runoff(P, E, f_parms, f_initials, runoff_file):
     # read data
-    P, E = read_inputs(fn)
     S0, FR0, im, WDM, WUM, WLM, SM, b, EX, kc, C, KI,  KG, WU, WL, WD = \
         read_parms(f_parms, f_initials)
 
