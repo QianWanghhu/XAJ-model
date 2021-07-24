@@ -1,0 +1,20 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio 2010
+Project("{6989167D-11E4-40FE-8C1A-2192A86A7E90}") = "优化算法+产汇流模型组合", "优化算法+产汇流模型组合\优化算法+产汇流模型组合.vfproj", "{DB9D1D68-6EBB-4E65-9D19-794DAACE65C7}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DB9D1D68-6EBB-4E65-9D19-794DAACE65C7}.Debug|Win32.ActiveCfg = Debug|Win32
+		{DB9D1D68-6EBB-4E65-9D19-794DAACE65C7}.Debug|Win32.Build.0 = Debug|Win32
+		{DB9D1D68-6EBB-4E65-9D19-794DAACE65C7}.Release|Win32.ActiveCfg = Release|Win32
+		{DB9D1D68-6EBB-4E65-9D19-794DAACE65C7}.Release|Win32.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

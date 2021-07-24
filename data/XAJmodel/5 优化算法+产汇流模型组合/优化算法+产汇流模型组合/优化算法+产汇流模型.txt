@@ -1,0 +1,2794 @@
+program Carlibration_Main
+    use global
+    use Carlibration_SCE
+    use Calibration_SM
+    use DataInput
+    use Data_Output
+
+    implicit none
+    character(len=2000)::Number,Cline
+    integer::i,j,Iter
+    real::OFV
+    real,allocatable::QC(:)
+
+    call getcwd(address)
+    filename=trim(address)//'\需设置文件\初始条件.txt'
+    open(10,file=filename)
+    read(10,*)AA                       !流域面积
+    read(10,*)PRModel                  !产流模型
+    read(10,*)RoutingModel             !汇流模型
+    read(10,*)CarModel                 !参数率定算法
+    read(10,*)NF                       !洪水场次
+    read(10,*)NP                       !雨量站个数
+    read(10,*)Key1                     !Key1为1时状态量已给出，2时需率定状态量
+    read(10,*)Key2                     !Key2为1时是模型参数率定，2时为预测
+    read(10,*)Iter                     !优化算法循环次数
+    read(10,*)Random_On                !是否加入随机性(加入每次优化结果会不同，不加入每次一样)：1时为加入随机性，2时为去除随机性
+    read(10,*)IN                       !上游控制站个数
+    close(10)
+    
+    call readdata(1)                   !数据输入
+    call ParameterScale(Key2)          !参数范围或是指输入
+
+
+    !参数优化，CarModel为1时采用SCE-UA算法，为2时采用单纯性法
+    allocate(QC(TT))
+    do i=1,iter
+        if(CarModel==1)then        
+            if(Key2==1)then
+                Key3=1
+                call SCE_UA(UpB,DownB,Xbest,OFV,QC)
+                call StateBoundGet(Xbest,UpState,DownState)
+                if(Key1==2)Then
+                    key3=2
+                    call SCE_UA(UpState,DownState,Ybest,OFV,QC)
+                End If
+            else
+                key3=2
+                call StateBoundGet(Xbest,UpState,DownState)
+                call SCE_UA(UpState,DownState,Ybest,OFV,QC)
+            end if
+        else
+            if(Key2==1)then
+                Key3=1
+                call SM(UpB,DownB,Xbest,OFV,QC)
+                call StateBoundGet(Xbest,UpState,DownState)
+                if(Key1==2)then
+                    Key3=2
+                    call SM(UpState,DownState,Ybest,OFV,QC)
+                end if
+            else
+                key3=2
+                call StateBoundGet(Xbest,UpState,DownState)
+                call SM(UpState,DownState,Ybest,OFV,QC)
+            end if
+        end if
+    end do
+
+    !结果输出
+    call DataOutput(QC)
+end program
+
+module global
+
+    implicit none
+    real,allocatable,save::Q(:),E(:),P(:,:),QIN(:,:)
+    real,allocatable,save::weight(:),state(:,:,:)
+    integer::TT,NP,NF,Key1,Key2,PRModel,RoutingModel,CarModel,Key3,Random_On,IN
+    integer,allocatable::FloodTime(:)
+    Character(len=2000)::filename,address
+    real::AA
+    real,allocatable::UpB(:),DownB(:),UpState(:),DownState(:),Xbest(:),Ybest(:)
+    integer::NRP,NRR
+    real::periods=1.0
+    real::CC(3)
+
+end module
+
+module DataInput
+    use global
+    implicit none
+
+    contains
+    subroutine readdata(n)
+        implicit none
+        integer::i,j,IS,n,N1
+
+        !读入降水、蒸发、径流数据
+        filename=trim(Address)//'\需设置文件\data.txt'
+        open(10,file=filename)
+        TT=0
+        do
+		    read(10,*,IOSTAT=IS)
+		    if(IS/=0) exit
+		    TT=TT+1
+	   end do
+       TT=TT-1
+       allocate(P(TT,NP))
+       allocate(Q(TT))
+       allocate(E(TT))
+       rewind(10)
+       read(10,*)
+       do i=1,TT
+           read(10,*)E(i),Q(i),P(i,:)
+       end do
+       close(10)
+
+        !读入降水、蒸发、径流数据
+        if(IN>0)then
+            filename=trim(Address)//'\需设置文件\上游控制站.txt'
+            open(10,file=filename)
+            allocate(QIN(TT,IN))
+            read(10,*)
+            do i=1,TT
+                read(10,*)QIN(i,:)
+            end do
+            close(10)
+        end if
+
+
+       !雨量站权重
+       allocate(weight(NP)) 
+       filename=trim(Address)//'\需设置文件\雨量站权重.txt'
+       open(10,file=filename)
+       do i=1,NP
+            read(10,*)weight(i)
+       end do
+       close(10) 
+
+       allocate(FloodTime(NF+1))
+       FloodTime(1)=0
+       filename=trim(Address)//'\需设置文件\次洪时间.txt'
+       open(10,file=filename)
+       read(10,*)
+       do i=1,NF
+           read(10,*)FloodTime(i+1)
+       end do
+       close(10)
+
+       if(PRModel==1)then
+           N1=5
+       else
+           N1=2
+       end if
+       allocate(state(NF,NP,N1),Ybest(NF*NP*N1))
+       state=0.0;Ybest=0.01
+
+       !初始状态量
+       if(Key1==1)then
+           filename=trim(Address)//'\需设置文件\初始状态量.txt'
+           open(10,file=filename)
+           read(10,*)
+           do i=1,NF
+               do j=1,NP
+                   read(10,*)state(i,j,:)
+                   Ybest((i-1)*NP*N1+(j-1)*N1+1:(i-1)*NP*N1+j*N1)=state(i,j,:)
+               end do
+           end do
+           close(10) 
+       end if
+
+       !目标函数权重
+       filename=trim(Address)//'\需设置文件\目标函数设置.txt'
+       open(10,file=filename)
+       do i=1,3
+           read(10,*)CC(i)
+       end do
+       close(10)
+    end subroutine
+end module
+
+module Data_Output
+    use global
+    implicit none
+
+    contains
+    !结果输出
+    subroutine DataOutput(QC)
+        implicit none
+        character(len=2000)::Number,Cline
+        real::QC(:)
+        integer::i,j,N1
+        
+        !输出最优产流参数
+        filename=trim(address)//'\结果\最优产流参数.txt'
+        open(10,file=filename)
+        do i=1,NRP
+            write(10,*)Xbest(i)
+        end do
+        close(10)
+
+        !输出最优汇流参数
+        filename=trim(address)//'\结果\最优汇流参数.txt'
+        open(10,file=filename)
+        do i=1,NRR
+            write(10,*)Xbest(NRP+i)
+        end do
+        close(10)
+
+        !输出每场洪水、每个雨量站对应的最优状态量
+        if(PRModel==1)then
+            N1=5
+        else
+            N1=2
+        end if
+        filename=trim(address)//'\结果\最优状态量.txt'
+        open(10,file=filename)        
+        do i=1,NF
+            write(Number,"(I4)")i
+            Cline='第'//trim(adjustl(Number))//'场洪水'
+            write(10,*)trim(adjustl(Cline))
+            do j=1,NP
+                write(10,*)Ybest((i-1)*NP*N1+(j-1)*N1+1:(i-1)*NP*N1+j*N1)
+            end do
+        end do
+        close(10)
+
+        !输出每场洪水的模拟结果
+        do i=1,NF
+            write(Number,"(I4)")i
+            filename=trim(Address)//'\结果\第'//trim(adjustl(Number))//'场洪水模结果.txt'
+            open(10,file=filename)
+            write(10,*)'实测值 模拟值'
+            do j=1,FloodTime(i+1)-FloodTime(i)
+               write(10,*)Q(FloodTime(i)+j),QC(FloodTime(i)+j)
+            end do
+            close(10)
+        end do
+
+    end subroutine
+end module
+
+module Calibration_SM
+    use global
+    use ModelCombination
+    implicit none
+
+    contains
+    subroutine SM(upbound,downbound,xx,OFV,QC)
+      !单纯性法
+
+       implicit none
+       real::upbound(:),downbound(:),xx(:)
+       real,allocatable::QC(:),ff(:)
+       real::OFV
+       integer::n,cato,nf,periods,sz,nn
+       integer::t=100000
+       integer::k,i,j,iterations,status,maxfloc,minfloc
+       real::b,a,d1,d2,f,f_reflect,f_exte,f_xc,maxf,minf
+       real::x(size(upbound)+1,size(upbound)+1),center(size(upbound)),reflect(size(upbound)),exte(size(upbound)),xc(size(upbound))
+       real,allocatable::r(:)
+       integer::x_up(size(upbound)),x_down(size(upbound)),y(1)
+
+       nn=0
+       b=0.1;a=1.0
+       n=size(upbound)
+       If(Random_On==1)then
+           call random_seed()
+       end if
+       allocate(r(n))
+       call random_number(r(1:n))
+       x(1,1:n)=r*(upbound-downbound)+downbound
+       allocate(ff(10000))
+       if(Key3==1)then
+           call CombinedModel(x(1,1:n),Ybest,QC,x(1,n+1))
+       else
+           call CombinedModel(Xbest,x(1,1:n),QC,x(1,n+1))
+       end if
+       OFV=x(1,n+1)
+       d1=((n+1)**0.5+n-1)*b/2.0**0.5/n
+       d2=((n+1)**0.5-1)*b/2.0**0.5/n
+
+       do i=2,n+1
+          x(i,1:n)=x(1,1:n)
+          x(i,1:n)=x(i,1:n)+d2
+          x(i,i-1)=x(i,i-1)-d2+d1
+          if(Key3==1)then
+              call CombinedModel(x(i,1:n),Ybest,QC,x(i,n+1))
+          else
+              call CombinedModel(Xbest,x(i,1:n),QC,x(i,n+1))
+          end if           
+       end do
+
+       do iterations=1,t
+          y=maxloc(x(:,n+1))
+          maxfloc=y(1)
+          maxf=maxval(x(:,n+1))
+          y=minloc(x(:,n+1))
+          minfloc=y(1)
+          minf=minval(x(:,n+1))
+
+          center=(sum(x(:,1:n),1)-x(maxfloc,1:n))/n
+          reflect=(1+a)*center-a*x(maxfloc,1:n)
+
+          x_down(1:n)=(/(0,i=1,n)/)
+          x_up(1:n)=(/(0,i=1,n)/)
+
+          do j=1,n
+            if (upbound(j)<reflect(j))   x_up(j)=1  
+            if (downbound(j)>reflect(j))  x_down(j)=1
+          end do
+
+          call random_seed()
+          call random_number(r)
+          reflect=(reflect-reflect*x_up)+x_up*center+r*(x_up*upbound-x_up*center)
+
+          call random_seed()
+          call random_number(r)
+          reflect=(reflect-reflect*x_down)+x_down*center-r*(x_down*center-x_down*downbound)
+
+          if(Key3==1)then
+              call CombinedModel(Reflect,Ybest,QC,f_reflect)
+          else
+              call CombinedModel(Xbest,Reflect,QC,f_reflect)
+          end if 
+          
+          if (f_reflect<maxf) then
+              exte=(1+2.0*a)*center-2.0*a*x(maxfloc,1:n)
+
+              x_down(1:n)=(/(0,i=1,n)/)
+              x_up(1:n)=(/(0,i=1,n)/)
+
+              do j=1,n
+                if (upbound(j)<exte(j))   x_up(j)=1 
+                if (downbound(j)>exte(j))  x_down(j)=1
+              end do
+              
+              call random_seed()
+              call random_number(r)
+              exte=(exte-exte*x_up)+x_up*center+r*(x_up*upbound-x_up*center)
+
+              call random_seed()
+              call random_number(r)
+              exte=(exte-exte*x_down)+x_down*center-r*(x_down*center-x_down*downbound)
+
+              if(Key3==1)then
+                  call CombinedModel(exte,Ybest,QC,f_exte)
+              else
+                  call CombinedModel(Xbest,exte,QC,f_exte)
+              end if        
+  
+              if (f_exte<maxf) then
+                  x(maxfloc,1:n)=exte
+                  x(maxfloc,n+1)=f_exte
+              else
+                  x(maxfloc,1:n)=reflect
+                  x(maxfloc,n+1)=f_reflect
+              end if
+
+         else
+             xc=center-(center-x(maxfloc,1:n))*a/2.0
+             
+             x_down(1:n)=(/(0,i=1,n)/)
+             x_up(1:n)=(/(0,i=1,n)/)
+
+             do j=1,n
+               if (upbound(j)<xc(j))   x_up(j)=1  
+               if (downbound(j)>xc(j))  x_down(j)=1
+             end do
+
+             call random_seed()
+             call random_number(r)
+             xc=(xc-xc*x_up)+x_up*center+r*(x_up*upbound-x_up*center)
+
+             call random_seed()
+             call random_number(r)
+             xc=(xc-xc*x_down)+x_down*center-r*(x_down*center-x_down*downbound)
+
+             if(Key3==1)then
+                 call CombinedModel(xc,Ybest,QC,f_xc)
+             else
+                 call CombinedModel(Xbest,xc,QC,f_xc)
+             end if 
+
+             if (f_xc<maxf) then
+                x(maxfloc,1:n)=xc
+                x(maxfloc,n+1)=f_xc
+             else
+                do k=1,n+1
+                   if (k/=minfloc) then
+                      x(k,1:n)=(x(minfloc,1:n)+x(k,1:n))/2.0
+
+                      x_down(1:n)=(/(0,i=1,n)/)
+                      x_up(1:n)=(/(0,i=1,n)/)
+                      do j=1,n
+                         if (upbound(j)<x(k,j))   x_up(j)=1  
+                         if (downbound(j)>x(k,j))  x_down(j)=1
+                      end do
+                      
+                      call random_seed()
+                      call random_number(r)
+                      x(k,1:n)=(x(k,1:n)-x(k,1:n)*x_up)+x_up*x(k,1:n)+r*(x_up*upbound-x_up*x(k,1:n))
+
+                      call random_seed()
+                      call random_number(r)
+                      x(k,1:n)=(x(k,1:n)-x(k,1:n)*x_down)+x_down*x(k,1:n)-r*(x_down*x(k,1:n)-x_down*downbound)
+
+                     if(Key3==1)then
+                         call CombinedModel(x(k,1:n),Ybest,QC,x(k,n+1))
+                     else
+                         call CombinedModel(Xbest,x(k,1:n),QC,x(k,n+1))
+                     end if
+                  end if
+
+                end do
+            end if
+         end if 
+         if(abs(mod(iterations,20))<1E-4)then
+           nn=nn+1
+           y=minloc(x(:,n+1))
+           minfloc=y(1)
+           maxf=x(minfloc,n+1) 
+           write(*,*)'iterations=',iterations
+           write(*,*)maxf
+           ff(nn)=maxf
+         end if    
+         if(iterations>400)then
+           if(abs(sum(ff(nn-10:nn-1))/10-ff(nn))<1E-5)then
+             exit
+           end if
+         end if
+       end do 
+       y=minloc(x(:,n+1))
+       minfloc=y(1);xx=x(minfloc,1:n)
+ 
+    end subroutine    
+
+
+end module
+
+module Carlibration_SCE
+    use global
+    use ModelCombination
+    implicit none
+
+    contains
+    
+    !SCE-UA算法
+    subroutine SCE_UA(upbound,downbound,xx,OFV,QC)
+        implicit none
+        !设置初始参数
+        integer::n,m,s,qq,o,alp,beta,dd,pp
+        integer::i,j,k,kk,SCE,cato,model
+        real::rnd2,maxf,OFV
+        integer::sample,L0,t,sz,nf
+        real::upbound(:),downbound(:),xx(:),QC(:)
+        real,allocatable::rnd(:)
+        real,allocatable::x1(:,:)
+        real,allocatable::f(:)
+        real,allocatable::D(:,:)
+        real,allocatable::A(:,:,:)
+        real,allocatable::C(:,:)
+        real,allocatable::L(:)
+        integer,allocatable::Lx(:)
+        integer,allocatable::counts(:)
+        integer,allocatable::Cou(:)
+        real,allocatable::b(:,:)
+        real,allocatable::B0(:,:)
+        integer,allocatable::BF(:)
+        real,allocatable::center(:)
+        real,allocatable::Reflect(:)
+        real,allocatable::Up(:)
+        real,allocatable::Low(:)
+        real::f_Ref,f_Contra,min_n,threshold,mu,f_Mua
+        integer::min_l
+        real,allocatable::Contra(:)
+        real,allocatable::Mutation(:)
+        
+        n=size(upbound)             !待优化的参数个数
+        m=n+1                       !单纯形中点的个数
+        pp=2                         !单纯形的个数
+        s=m*pp                       !样本数
+        qq=3                       !每个子单纯形中点的个数
+        o=100                        !SCE-UA算法的执行次数
+        alp=1                       !父代产生的子代个数
+        beta=2*n+1                  !每个单纯形进化运算的步骤数
+        dd=1
+        allocate(rnd(n))    
+        allocate(x1(s,n+1))
+        allocate(D(s,n+1))
+        allocate(f(s))
+        allocate(counts(m))
+        allocate(A(m,n+1,pp))
+        allocate(C(m,n+1))
+        allocate(L(qq))
+        allocate(Cou(m))
+        allocate(b(qq,n+1))
+        allocate(B0(qq,n+1))
+        allocate(BF(qq))
+        allocate(center(n))
+        allocate(Reflect(n))
+        allocate(Up(n))
+        allocate(Low(n))
+        allocate(Contra(n))
+        allocate(Mutation(n))
+
+
+        !在合理的定义域内随机抽取s组参数组
+        If(Random_On==1)then
+            call random_seed()
+        end if
+        do i=1,s
+            call random_number(rnd)
+            x1(i,1:n)=rnd*(upbound-downbound)+downbound
+            if(Key3==1)then
+                call CombinedModel(x1(i,1:n),Ybest,QC,OFV)
+            else
+                call CombinedModel(Xbest,x1(i,1:n),QC,OFV)
+            end if
+            f(i)=OFV
+            x1(i,n+1)=f(i)
+        end do
+                
+        !根据目标函数对参数组从大到小排序
+        D=x1
+        allocate(Lx(size(D,1)))
+        call sortrows(D,n+1,Lx)
+        counts(1)=m
+        do i=2,m
+            counts(i)=counts(i-1)+m-i+1
+        end do
+
+        !SCE-UA算法主体
+        do SCE=1,o
+            !根据目标函数对参数组从小到大排序
+            call sortrows(D,n+1,Lx)
+            !将s组参数组分配给pp个子矩阵
+            do i=1,pp
+                do j=1,m
+                    A(j,:,i)=D(i+pp*(j-1),:)
+                end do
+            end do
+            do i=1,Beta
+                do j=1,pp
+                    C=A(:,:,j)
+                    L=0
+                    Cou=counts
+                    !根据概率，从子矩阵中抽取qq个参数组
+                    do k=1,qq
+                        call random_number(rnd2)
+                        sample=ceiling(rnd2*maxval(Cou))
+                        L0=1
+                        do kk=1,m
+                            if (Cou(kk)>=sample) then
+                                L0=kk
+                                exit
+                            end if
+                        end do
+                        L(k)=L0
+                        do kk=1,m
+                            if (Cou(kk)>=sample) then
+                                Cou(kk)=Cou(kk)-(m-L(k)+1)
+                            end if
+                        end do
+                        b(k,:)=C(L(k),:)                   !把选取的q个点放于b中
+                    end do
+                    !单纯形优化
+                    do k=1,alp
+                        B0=b                               !调用sortrows后b会改变
+                        call sortrows(b,n+1,BF)
+                        center=(sum(B0(:,1:n),1)-B0(BF(qq),1:n))/(qq-1)   !算中心点
+                        Reflect=center+dd*(center-B0(BF(qq),1:n))         !算反射点
+                        Up=maxval(B0(:,1:n),1)
+                        Low=minval(B0(:,1:n),1)
+                        if ((.not. all(upbound>Reflect)) .or. (.not. all(Reflect>downbound))) then
+                            call random_number(rnd)
+                            Reflect=rnd*(Up-Low)+Low
+                        end if 
+
+                        if(Key3==1)then
+                            call CombinedModel(Reflect,Ybest,QC,OFV)
+                        else
+                            call CombinedModel(Xbest,Reflect,QC,OFV)
+                        end if
+                                                                    
+                        f_Ref=OFV
+                        if (f_Ref<B0(BF(qq),n+1)) then
+                            B0(BF(qq),1:n)=Reflect
+                            B0(BF(qq),n+1)=f_Ref
+                        else
+                            Contra=center-(center-B0(BF(qq),1:n))*dd/2
+
+                            if(Key3==1)then
+                                call CombinedModel(Contra,Ybest,QC,OFV)
+                            else
+                                call CombinedModel(Xbest,Contra,QC,OFV)
+                            end if
+
+                            f_Contra=OFV
+                            if (f_Contra<B0(BF(qq),n+1)) then
+                                B0(BF(qq),1:n)=Contra
+                                B0(BF(qq),n+1)=f_Contra
+                            else
+                                call random_number(rnd)
+                                Mutation=rnd*(Up-Low)+Low
+
+                                if(Key3==1)then
+                                    call CombinedModel(Mutation,Ybest,QC,OFV)
+                                else
+                                    call CombinedModel(Xbest,Mutation,QC,OFV)
+                                end if     
+
+                                f_Mua=OFV
+                                B0(BF(qq),1:n)=Mutation
+                                B0(BF(qq),n+1)=f_Mua
+                            end if
+                        end if
+                        b=B0
+                    end do
+
+                    !返回到子矩阵
+                    do k=1,qq
+                        C(L(k),:)=b(k,:)
+                    end do 
+
+                    !排序
+                    call sortrows(C,n+1,Lx)
+                    A(:,:,j)=C
+                end do
+            end do
+
+            !将单纯形法的优化结果返回原矩阵D中
+            do i=1,pp
+                do j=1,m
+                    D(i+pp*(j-1),:)=A(j,:,i)
+                end do
+            end do
+            min_n=minval(D(:,n+1))
+            min_l=0
+            do i=1,n+1
+                min_l=min_l+1
+                if(min_n==D(i,n+1)) exit
+            end do
+            threshold=1-min_n
+            write(*,*)'SCE=',SCE
+            write(*,*)'OFV=',min_n
+        end do
+        xx=D(min_l,1:n);maxf=D(min_l,n+1)      
+               
+    end subroutine
+!--------------------------------------------------------------------------------------------!
+    !对矩阵以整行排序，从小到大
+    !D：需排序的矩阵；nn：排序参照的列；Lx：排序后各行原行号
+    !r0:矩阵行数；c0：矩阵列数
+    subroutine sortrows(D,nn,Lx)
+        implicit none
+        real::D(:,:)
+        integer::Lx(:)
+        integer::nn,r0,c0
+        integer::i,j
+        real,allocatable::temp(:)
+        real,allocatable::D_1(:,:)          
+        r0=size(D,1)
+        c0=size(D,2)
+        allocate(temp(c0))
+        allocate(D_1(r0,c0))
+        D_1=D                               !存储原始的数组D
+        do i=1,r0-1
+            do j=i+1,r0
+                if(D(i,nn)>D(j,nn))then
+                    temp=D(i,:)
+                    D(i,:)=D(j,:)
+                    D(j,:)=temp
+                end if
+            end do
+        end do
+        do i=1,r0
+            do j=1,r0
+                if (all(abs(D(i,:)-D_1(j,:))<1.0e-34))then
+                    Lx(i)=j
+                    exit
+                end if
+            end do
+        end do
+    end subroutine
+end module
+
+module ModelCombination
+    use global
+    use XAJModel
+    use HBModel
+    use SBModel
+    implicit none
+
+    contains
+    subroutine ParameterScale(n)
+        implicit none
+        integer::n,i,j
+
+        select case(PRModel)
+        case(1)
+            NRP=10
+        case(2)
+            NRP=8
+        case(3)
+            NRP=4
+        end select
+
+        select case(RoutingModel)
+        case(1)
+            NRR=7
+        case(2)
+            NRR=6
+        case(3)
+            NRR=4
+        end select
+
+        allocate(UpB(NRR+NRP+3*IN+NP),DownB(NRR+NRP+3*IN+NP),Xbest(NRR+NRP+3*IN+NP))
+        UpB=0.0;DownB=0.0;Xbest=0.0
+
+        !Key2为1时需要输入参数范围，为1时直接输入参数数值
+        if(Key2==1)then
+            
+            if(PRModel==1)then
+                filename=trim(address)//'\需设置文件\产流模型参数\新安江模型范围.txt'
+            else if(PRModel==2)then
+                filename=trim(address)//'\需设置文件\产流模型参数\河北模型范围.txt'
+            else
+                filename=trim(address)//'\需设置文件\产流模型参数\陕北模型范围.txt'
+            end if   
+            open(10,file=filename)
+            do i=1,NRP
+                read(10,*)UpB(i),DownB(i)
+            end do
+            close(10)
+
+            if(RoutingModel==1)then
+                filename=trim(address)//'\需设置文件\汇流模型参数\新安江模型范围.txt'
+            else if(RoutingModel==2)then
+                filename=trim(address)//'\需设置文件\汇流模型参数\河北模型范围.txt'
+            else
+                filename=trim(address)//'\需设置文件\汇流模型参数\陕北模型范围.txt'
+            end if
+
+            open(10,file=filename)
+            do i=1,NRR
+                read(10,*)UpB(NRP+i),DownB(NRP+i)
+            end do
+            close(10)
+
+            if(IN>0)then
+                do i=1,IN
+                    filename=trim(address)//'\需设置文件\上游控制站\马斯京根参数范围.txt'
+                    open(10,file=filename)
+                    do j=1,3
+                        read(10,*)UpB(NRR+NRP+(i-1)*3+j),DownB(NRR+NRP+(i-1)*3+j)
+                    end do
+                    close(10)
+                end do
+            end if
+
+            filename=trim(address)//'\需设置文件\汇流模型参数\马斯京根分段数范围.txt'
+            open(10,file=filename)
+            do j=1,NP
+                read(10,*)UpB(NRR+NRP+3*IN+j),DownB(NRR+NRP+3*IN+j)
+            end do
+            close(10)
+
+        else
+
+            if(PRModel==1)then
+                filename=trim(address)//'\需设置文件\产流模型参数\新安江模型.txt'
+            else if(PRModel==2)then
+                filename=trim(address)//'\需设置文件\产流模型参数\河北模型.txt'
+            else
+                filename=trim(address)//'\需设置文件\产流模型参数\陕北模型.txt'
+            end if   
+            open(10,file=filename)
+            do i=1,NRP
+                read(10,*)Xbest(i)
+            end do
+            close(10)
+
+            if(RoutingModel==1)then
+                filename=trim(address)//'\需设置文件\汇流模型参数\新安江模型.txt'
+            else if(RoutingModel==2)then
+                filename=trim(address)//'\需设置文件\汇流模型参数\河北模型.txt'
+            else
+                filename=trim(address)//'\需设置文件\汇流模型参数\陕北模型.txt'
+            end if
+            open(10,file=filename)
+            do i=1,NRR
+                read(10,*)Xbest(NRP+i)
+            end do
+            close(10)
+
+            if(IN>0)then
+                filename=trim(address)//'\需设置文件\上游控制站\马斯京根参数.txt'
+                open(10,file=filename)
+                read(10,*)
+                do i=1,3*IN
+                    if((MOD(i,3)==1).AND.(i/=3*IN))then
+                        read(10,*)
+                    end if
+                    read(10,*)Xbest(NRR+NRP+i)
+                end do
+                close(10)
+            end if      
+            filename=trim(address)//'\需设置文件\汇流模型参数\子流域马斯京根分段数.txt'
+            open(10,file=filename)
+            do j=1,NP
+                read(10,*)Xbest(NRR+NRP+3*IN+i)
+            end do
+            close(10)                             
+        end if
+
+    end subroutine
+
+    subroutine StateBoundGet(Xbest,UpState,DownState)
+        implicit none
+        integer::i
+        real,allocatable::Xbest(:),UpState(:),DownState(:)
+
+        Select case(PRModel)
+        case(1)
+            allocate(UpState(5),DownState(5))
+            UpState=(/Xbest(2),Xbest(3),Xbest(1),Xbest(4),1.0/)
+            DownState=(/1E-5,1E-5,1E-5,1E-5,1E-5/)
+        case(2)
+            allocate(UpState(2),DownState(2))
+            UpState=(/Xbest(5),Xbest(5)/)
+            DownState=(/1E-5,1E-5/)
+        case(3)
+            allocate(UpState(2),DownState(2))
+            UpState=(/100.0,500.0/)
+            DownState=(/0.1,0.1/)
+        end select
+
+
+    end subroutine
+
+
+    subroutine CombinedModel(x,y1,QC,OFV)
+        
+        !不同模型组合产汇流
+        implicit none
+        integer::i,j,N1
+        real::x(:),y1(:),QC(:)
+        real::OFV,DC,DWT,DQT
+        real,allocatable::RunoffProduction(:,:),RunoffProductionAll(:,:),y(:),k(:),xx(:),nn(:),QM1(:),QM2(:),QC1(:)
+        real,allocatable::RS(:),RI(:),RG(:),maxQ(:),maxQC(:),DW(:)
+
+        allocate(RunoffProduction(TT,3),RunoffProductionAll(TT,3),maxQ(NF),maxQC(NF),DW(NF),RS(TT),RI(TT),RG(TT),k(IN),xx(IN),nn(IN),QM1(TT),QM2(TT),QC1(TT))
+        RunoffProduction=0.0;RunoffProductionAll=0.0;QM1=0.0;QM2=0.0;QC1=0.0;QC=0.0
+        if(PRModel==1)then
+            N1=5
+        else
+            N1=2
+        end if
+        
+        if(IN>0)then
+            do i=1,IN
+                k(i)=x(NRP+NRR+(i-1)*3+1);xx(i)=x(NRP+NRR+(i-1)*3+2);nn(i)=x(NRP+NRR+(i-1)*3+3)
+            end do
+        end if
+
+        allocate(y(N1))
+        do i=1,NF
+            
+            !产流模型         
+            do j=1,NP
+                y(:)=y1((i-1)*NP*N1+(j-1)*N1+1:(i-1)*NP*N1+j*N1);RunoffProduction=0.0;QC1=0.0
+                select case(PRModel)
+                case(1)
+                    call XAJ_RP(x(1:NRP),y(:),P(FloodTime(i)+1:FloodTime(i+1),j),E(FloodTime(i)+1:FloodTime(i+1)),RunoffProduction(FloodTime(i)+1:FloodTime(i+1),:))
+                case(2)
+                    call HBModel_RP(x(1:NRP),y(:),P(FloodTime(i)+1:FloodTime(i+1),j),E(FloodTime(i)+1:FloodTime(i+1)),RunoffProduction(FloodTime(i)+1:FloodTime(i+1),:))
+                case(3)
+                    call SBModel_RP(x(1:NRP),y(:),P(FloodTime(i)+1:FloodTime(i+1),j),E(FloodTime(i)+1:FloodTime(i+1)),RunoffProduction(FloodTime(i)+1:FloodTime(i+1),:))
+                end select
+                RS=RunoffProduction(FloodTime(i)+1:FloodTime(i+1),1);RI=RunoffProduction(FloodTime(i)+1:FloodTime(i+1),2);RG=RunoffProduction(FloodTime(i)+1:FloodTime(i+1),3)
+
+                !汇流模型 
+                select case(RoutingModel)
+                case(1)
+                    call XAJRouting(RS(FloodTime(i)+1:FloodTime(i+1)),RI(FloodTime(i)+1:FloodTime(i+1)),RG(FloodTime(i)+1:FloodTime(i+1)),x(NRP+1:NRP+NRR),x(NRR+NRP+3*IN+j),Q(FloodTime(i)+1),QC1(FloodTime(i)+1:FloodTime(i+1)))
+                case(2)
+                    call HBModelRouting(RS(FloodTime(i)+1:FloodTime(i+1)),RI(FloodTime(i)+1:FloodTime(i+1)),RG(FloodTime(i)+1:FloodTime(i+1)),x(NRP+1:NRP+NRR),x(NRR+NRP+3*IN+j),Q(FloodTime(i)+1),QC1(FloodTime(i)+1:FloodTime(i+1)))     
+                case(3)
+                    call SBModelRouting(RS(FloodTime(i)+1:FloodTime(i+1)),RI(FloodTime(i)+1:FloodTime(i+1)),RG(FloodTime(i)+1:FloodTime(i+1)),x(NRP+1:NRP+NRR),x(NRR+NRP+3*IN+j),Q(FloodTime(i)+1),QC1(FloodTime(i)+1:FloodTime(i+1))) 
+                end select
+
+                QC(FloodTime(i)+1:FloodTime(i+1))=QC(FloodTime(i)+1:FloodTime(i+1))+QC1(FloodTime(i)+1:FloodTime(i+1))*weight(j)
+            end do
+
+            if(IN>0)then
+                do j=1,IN
+                    QM1(FloodTime(i)+1:FloodTime(i+1))=0.0
+                    call Muskingum_Routing(QIN(:,j),k(j),xx(j),nn(j),1.0,QM1(FloodTime(i)+1:FloodTime(i+1)))
+                    QM2(FloodTime(i)+1:FloodTime(i+1))=QM2(FloodTime(i)+1:FloodTime(i+1))+QM1(FloodTime(i)+1:FloodTime(i+1))
+                end do
+            end if
+
+        end do
+
+        QC=QC+QM2
+
+        !模拟结果的目标函数计算
+        do i=1,NF
+            maxQ(i)=maxval(Q(FloodTime(i)+1:FloodTime(i+1)))
+            maxQC(i)=maxval(QC(FloodTime(i)+1:FloodTime(i+1)))
+            DW(i)=abs(sum(QC(FloodTime(i)+1:FloodTime(i+1)))-sum(Q(FloodTime(i)+1:FloodTime(i+1))))/sum(Q(FloodTime(i)+1:FloodTime(i+1)))
+        end do
+        DC=1-(sum((Q-QC)**2.0))/(sum((Q-sum(Q)/size(Q))**2.0))
+        DQT=sum(abs(maxQ-maxQC)/maxQ)/NF
+        DWT=sum(DW)/NF
+        OFV=CC(1)*DQT+CC(2)*(1-DC)+CC(3)*DWT
+
+    end subroutine
+
+    subroutine Muskingum_Routing(QIN,k,xx,NN,dt,QC)
+       implicit none
+       real::k,xx,NN,dt,t
+       real::QIN(:),QC(:)
+       Integer::i,j,N1,TT
+       real,allocatable::QC1(:,:)
+       real::C0,C1,C2
+
+       N1=ceiling(NN)
+       C0=(0.5*dt-k*xx)/(0.5*dt+k-k*xx)
+       C1=(0.5*dt+k*xx)/(0.5*dt+k-k*xx)
+       C2=(-0.5*dt+k-k*xx)/(0.5*dt+k-k*xx)
+       TT=size(QC)
+
+       !河道汇流采用马斯京根法
+       allocate(QC1(TT,N1+1))
+       QC1=QIN(1);QC1(:,1)=QIN
+       do i=1,N1
+          do t=2,TT
+              QC1(t,i+1)=C0*QC1(t,i)+C1*QC1(t-1,i+1)+C2*QC1(t-1,i)
+          end do
+       end do
+       QC=QC1(:,N1+1)
+
+    end subroutine
+
+end module
+
+module XAJModel
+    use global
+    implicit none
+
+    contains
+    !新安江产流模型
+    subroutine XAJ_RP(x,y,P1,E1,Output)
+        implicit none
+        real::x(:),y(:),Output(:,:),P1(:),E1(:)
+        real,allocatable::EP(:),WL1(:),WU1(:),WD1(:),RSS(:),RII(:),RGG(:)
+        real::S0                 !时段初的自由水蓄量 
+        real::FR0                !时段初的产流面积比例
+        real::im=0.197          !不透水面积占比
+        real::WDM,WUM,WLM,SM,b,EX,kc,C,KI,KG,DWT,SMM1,SM1
+        real::WL,WU,WD,WM,WMM,MS,EU,EL,ED
+        real::UE,PE,W0,SS,QD
+        real::Rb,R,a,AU
+        real::RS,RI,RG,KIt,KGt,FR,RS1,RG1,RI1,S
+        integer::t,i,j,N,periods,NN
+        real::C0,C1,C2,DQT
+        allocate(EP(size(Q)))
+
+        NN=size(Q)
+        allocate(WL1(NN),WU1(NN),WD1(NN),RSS(NN),RII(NN),RGG(NN))
+
+        WDM=x(1)                 !深层土壤水含水容量
+        WUM=x(2)                 !上层土壤水含水容量
+        WLM=x(3)                 !下层土壤水含水容量
+        SM=x(4)                  !流域平均自由水蓄积容量
+        b=x(5)                   !反映流域包气带蓄水容量分布的不均匀性
+        EX=x(6)                  !自由水蓄量分布曲线指数
+        kc=x(7)                  !蒸发折算系数
+        C=x(8)                   !蒸发扩散系数
+        KI=x(9)/(x(9)+x(10))*0.8     !壤中流出流系数
+        KG=x(10)/(x(9)+x(10))*0.8    !地下径流出流系数
+
+        WM=WLM+WUM+WDM           !流域平均蓄水容量
+        WMM=WM*(b+1.0)           !流域单点最大蓄水量
+        MS=SM*(EX+1.0)            !流域最大自由水蓄量
+        EP=kc*E1                  !计算蒸散发能力
+
+        KIt=(1.0-(1.0-KI-KG)**(1.0/(24.0*1.0)))/(1.0+KG/KI)      !划分小段后的参数值             
+        KGt=KG*KIt/KI;KI=KIt;KG=KGt                   
+        WU=y(1)              !下层土壤含水量
+        WL=y(2)              !深层土壤含水量
+        WD=y(3)              !上层土壤含水量
+        S0=y(4)
+        FR0=y(5)
+        if(WU>WUM)then
+            WL=WL+WU-WUM;WU=WUM
+        end if
+        if(WL>WLM)then
+            WD=WD+WL-WLM;WL=WLM
+        end if          
+        if(WD>WDM)WD=WDM
+        if(S0>SM)then
+            S0=SM
+        end if
+
+        WL1(1)=WL;WD1(1)=WD;WU1(1)=WU
+        RSS(1)=0.0;RII(1)=0.0;RGG(1)=0.0
+
+        do t=2,NN
+
+            W0=WL+WU+WD          !t时段的初始土壤含水量
+            if (W0>WM)W0=WM
+            PE=P1(t)-EP(t)
+
+            !流域蒸散发，三层蒸发模型
+            if (P1(t)-EP(t)<0.0) then
+                if(WU+P1(t)>EP(t))then
+                    EU=EP(t);EL=0.0;ED=0.0
+                    WU=WU+P1(t)-EP(t)
+                else 
+                    EU=WU+P1(t);WU=0.0              
+                    if (WL>C*WLM) then
+                        EL=(EP(t)-EU)*WL/WLM;ED=0.0;WL=WL-EL
+                    else
+                        if (WL>C*(EP(t)-EU)) then
+                            EL=C*(EP(t)-EU);ED=0.0;WL=WL-EL
+                        else
+                            EL=WL;WL=0.0;ED=C*(EP(t)-EU)-WL;WD=WD-ED
+                          if (WD<=0) then
+                            ED=ED+WD;WD=0.0
+                          end if
+                        end if
+                    end if
+                end if
+            end if
+            UE=EU+ED+EL
+            PE=P1(t)-UE           !扣除蒸发的净雨
+            if (PE<0) PE=0.0
+
+            !流域产流
+            if (PE>0) then
+                Rb=im*PE                                         !不透水面积产流
+                a=WMM*(1.0-(1.0-W0/WM)**(1.0/(1.0+b)))           !W0对应的纵坐标
+                if ((a+PE)<WMM) then 
+                    R=PE-WM+W0+WM*((1-(PE+a)/WMM)**(b+1.0))
+                else
+                    R=PE-(WM-W0)
+                end if
+            else
+                R=0.0;Rb=0.0
+            end if
+
+            if (abs(R)<1E-10) R=0.0
+
+            if(PE>0)then
+              if(WU+PE-R>WUM)then
+                if(WU+WL+PE-R-WUM>WLM)then
+                  WU=WUM;WL=WLM
+                  WD=W0+PE-R-WU-WL
+                  if(WD>WDM)WD=WDM
+                else
+                  WL=WU+WL+PE-R-WUM;WU=WUM                 
+                end if
+              else
+                WU=WU+PE-R
+              end if
+            end if
+            
+            RS=0.0;RI=0.0;RG=0.0
+            !分水源计算
+            if (R>0.0) then
+                FR=R/PE
+                S=S0*FR0/FR
+                QD=R/FR
+                N=floor(QD/5)+1                        !将每个计算时段的入流R，按5mm分成N段
+                KIt=(1.0-(1.0-KI-KG)**(1.0/(N*1.0)))/(1.0+KG/KI)      !划分小段后的参数值               
+                KGt=KG*KIt/KI
+                QD=QD/N
+
+                SMM1=MS
+                SM1=SMM1/(1.0+EX)
+               
+                SS=S;RS=0.0;RI=0.0;RG=0.0;j=0
+                do i=1,N                   
+                    j=j+1
+                    if(S>SM1)then
+                      AU=SMM1
+                    else
+                      AU=SMM1*(1.0-(1.0-S/SM1)**(1.0/(1.0+EX)))  !S0对应的纵坐标
+                    end if
+
+                    if (QD+AU<SMM1) then 
+                        RS=FR*(QD+S-SM1+SM1*((1.0-(QD+AU)/SMM1)**(EX+1.0)))+RS
+                    else
+                        RS=FR*(QD+S-SM1)+RS
+                    end if
+
+                    S=i*QD-RS/FR+S
+                    RI=KIt*FR*S+RI
+                    RG=KGt*FR*S+RG
+                    S=SS+i*QD-(RS+RI+RG)/FR
+                    
+                    if (S>SM1) S=SM1
+                    if(S<0)S=0.0
+                end do
+                S0=S;FR0=FR
+            else
+                RS=0.0;RG=0.0;RI=0.0
+                RG=S0*KG*FR0;RI=S0*KI*FR0
+                S0=S0-(RG+RI)/FR0
+            end if
+            RS=Rb+RS*(1-im);RG=RG*(1-im);RI=RI*(1-im)
+            WU1(t)=WU;WL1(t)=WL;WD1(t)=WD
+            RSS(t)=RS;RII(t)=RI;RGG(t)=RG
+
+        end do
+        Output(:,1)=RSS;Output(:,2)=RII;Output(:,3)=RGG
+    end subroutine
+
+    !新安江汇流模型
+    subroutine XAJRouting(RS,RI,RG,x,x1,Q1,QC)
+       implicit none
+       real::Q1,x1
+       real::RS(:),RI(:),RG(:),QC(:),x(:)
+       integer::i,j,t,NN,n,L
+       real::CS,CI,CG,K,xx,dt,C0,C1,C2
+       real,allocatable::QS(:),QI(:),QG(:),QT(:),QQ(:),QC1(:,:),QC2(:),QC3(:)
+
+       CS=x(1)                 !地面径流消退系数
+       CI=x(2)                 !壤中流消退系数
+       CG=x(3)                 !地下径流消退系数
+       L=floor(x(4))
+       n=floor(x1)
+       K=x(6)                  !槽蓄系数
+       xx=x(7)                 !流量比重系数
+       dt=K                    !演算时段
+
+       C0=(0.5*dt-K*xx)/(0.5*dt+K-K*xx)
+       C1=(0.5*dt+K*xx)/(0.5*dt+K-K*xx)
+       C2=(-0.5*dt+K-K*xx)/(0.5*dt+K-K*xx)
+       NN=size(QC)
+       allocate(QS(NN),QI(NN),QG(NN),QT(NN),QQ(NN))
+       CI=CI**(1.0/24.0)
+       CG=CG**(1.0/24.0)
+       QS=0.0;QI=0.0;QG=0.0;QG(1)=Q(1);QT=0.0
+       QQ=Q(1)
+       QQ=0.0
+       QG=0.0
+
+       !地表、壤中和地下径流以线性水库汇流
+       do t=2,NN
+           QS(t)=RS(t)*AA/3.6/periods
+           QI(t)=CI*QI(t-1)+(1.0-CI)*RI(t)*AA/3.6/periods
+           QG(t)=CG*QG(t-1)+(1.0-CG)*RG(t)*AA/3.6/periods
+       end do
+       QT=QS+QI+QG
+
+       !河网汇流采用线性水库
+       do t=1,NN-1
+          if(t-L>1)then
+            QQ(t+1)=CS*QQ(t)+(1.0-CS)*QT(t-L)  
+          end if            
+       end do
+
+       !河道汇流采用马斯京根法
+       allocate(QC1(TT,n+1))
+       QC1=Q(1);QC1(:,1)=QQ
+       if(n>0)then
+           allocate(QC2(TT),QC3(TT))
+           QC3=Q(1);QC2=QQ
+           do i=1,n
+                do t=1,TT-1
+                    QC3(t+1)=C0*QC2(t+1)+C1*QC2(t)+C2*QC3(t)
+                end do
+                QC2=QC3
+           end do
+           QC=QC2
+       else
+           QC=QS
+       end if    
+
+    end subroutine
+
+end module
+
+module HBModel
+    use global
+    implicit none
+
+    contains
+    !河北产流模型
+    subroutine HBModel_RP(x,y,P1,E1,Output)
+      implicit none
+      real::x(:),y(:),Output(:,:),P1(:),E1(:)
+      real::FM,N,Fc,WM,b,F,U,WMM,W0,DC,A,DQT,W,KC,IM,I0,I1,X1,K,PA0,WU,WL,WUM,WLM,EU,EL,WMX
+      integer::NN
+      integer::t,i,TG,TS
+      real,allocatable::PE(:),R(:),RG(:)
+      real::s1,s2,s,QS1,QG1,B1,CC,ss,ss1,ss2,FA
+
+      U=x(1)
+      FC=x(2)
+      FM=x(3)
+      N=x(4)
+      WM=x(5)
+      WMX=x(6)
+      B=x(7)
+      X1=x(8)
+      NN=size(Q)
+
+      allocate(R(NN),RG(NN),PE(NN))
+      
+      WMM=WM*(B+1);WUM=WM*WMX;WLM=WM-WUM
+      IM=X1*WM;R=0.0;RG=0.0
+      I0=y(1);PA0=y(2)      
+      W0=PA0;WU=PA0*WMX;WL=PA0-WU
+
+      !计算产流量
+      do t=2,NN
+           
+          F=(P1(t)-P1(t)**(1.0+N)/FM**N/(1.0+N))*exp(-u*I0)+FC
+          FA=P1(t)-P1(t)**(1.0+N)/FM**N/(1.0+N)
+          
+          if(P1(t)>0.0)then
+              F=FC+1.0;ss1=1.0
+              do while(ss1>1E-3)
+                  ss2=FA*exp(-u*I0)*(1-exp(-u*F))/(u*F)+FC
+                  ss1=abs(ss2-F)
+                  F=ss2
+              end do
+           end if
+                               
+          !地表产流
+          R(t)=P1(t)-F    
+          if(R(t)<0) R(t)=0
+          if(P1(t)<F)then
+              F=P1(t)
+          else
+              F=F
+          end if
+
+          !地下产流
+          if(F>0.0)then
+              if(W0<WM)then
+                  A=WMM*(1.0-(1.0-W0/WM)**(1.0/(1.0+B)))
+              else
+                  A=WMM
+              end if
+              if((F+A)>WMM)then
+                  RG(t)=F-(WM-W0)
+              else
+                  RG(t)=F-(WM-W0)+WM*(1.0-(F+A)/WMM)**(1.0+b)
+              end if
+          else
+              RG(t)=0.0
+          end if
+
+
+          !计算蒸散发及土湿
+          if(WU+F-E1(t)>0)then
+              EU=E1(t);EL=0.0;WU=WU+F-E1(t)
+          else
+              EU=WU+F;WU=0.0;EL=(E1(t)-EU)*WL/WLM;WL=WL-EL
+          end if
+
+          if(F>0)then
+              if(WU+F-RG(t)>WUM)then
+                  WL=WL+WU+F-RG(t)-WUM;WU=WUM
+                  if(WL>WLM)WL=WLM
+              else
+                  WU=WU+F-RG(t)
+              end if
+          end if
+
+          W0=WL+WU
+          !时段末状态量
+          if(W0<0)W0=0
+          K=1-E(t)/IM;I1=K*(I0+P1(t)-R(t))
+          if(I1<0)I1=0
+        end do
+
+        Output(:,1)=R;Output(:,3)=RG
+    end subroutine
+
+    !河北汇流模型
+    subroutine HBModelRouting(RS,RI,RG,x,x1,Q1,QC)
+        implicit none
+        real::Q1,x1
+        real::RS(:),RI(:),RG(:),QC(:),x(:)
+        integer::i,j,t,NN,n
+        real::AS,AG,BS,BG,ss,ss1,B1,ss2
+        integer::TS,TG
+        real,allocatable::QS(:),QG(:)
+
+        AS=x(1)
+        AG=x(2)
+        BS=x(3)
+        BG=x(4)     
+        TS=floor(x(5))
+        TG=floor(x(6))
+        NN=size(QC)
+        AS=AS*AA**1.2/1.0/60.0
+        AG=AG*AA**1.2/1.0/60.0
+        allocate(QS(NN),QG(NN))
+        QS=0.0;QG=Q1;QC=Q1
+        RG=RG+RI
+
+        !坡面、河网和河道统一采用非线性汇流模型
+        do t=1,NN-1
+
+           !地表汇流计算      
+            if(t<TS+1)then
+                QS(t)=0.0
+            else  
+                if(RS(t-TS+1)>1E-4) then
+                  B1=AS/(1.0-BS)
+                  ss=RS(t-TS+1)*AA/3.6/1.0-QS(t)/2.0+B1*QS(t)**(1.0-BS)
+                  QS(t+1)=QS(t)+1
+                  ss1=abs(QS(t+1)-QS(t))
+                  do while(ss1>1E-3)
+                    ss2=ss/(B1*QS(t+1)**(-BS)+0.5)
+                    ss1=abs(ss2-QS(t+1))
+                    QS(t+1)=ss2
+                  end do                         
+              else             
+                  QS(t+1)=QS(t)*(1+BS/AS*QS(t)**BS)**(-1/BS)
+              end if
+            end if
+
+            !地下汇流计算
+            if(t<TG+1)then 
+                QG(t+1)=QG(t)*(1+BG/AG*QG(t)**BG)**(-1/BG)
+            else
+                if(RG(t-TG+1)>1E-4)then
+                  B1=AG/(1.0-BG)
+                  ss=RG(t-TG+1)*AA/3.6/1.0-QG(t)/2.0+B1*QG(t)**(1.0-BG)
+                  QG(t+1)=QG(t)+1
+                  ss1=abs(QG(t+1)-QG(t))
+                  do while(ss1>1E-3)
+                    ss2=ss/(B1*QG(t+1)**(-BG)+0.5)
+                    ss1=abs(ss2-QG(t+1))
+                    QG(t+1)=ss2
+                  end do                            
+                else
+                  QG(t+1)=QG(t)*(1+BG/AG*QG(t)**BG)**(-1/BG)
+              end if 
+            end if                  
+            if(QS(t+1)<0)QS(t+1)=0.0
+            if(QG(t+1)<0)QG(t+1)=0.0
+        end do
+
+        QC=QS+QG      
+    end subroutine
+
+end module
+
+module SBModel
+    use global
+    implicit none
+
+    contains
+    !陕北产流模型
+    subroutine SBModel_RP(x,y,P1,E1,Output)
+        implicit none
+        real::x(:),y(:),Output(:,:),P1(:),E1(:)
+        real::mu,KC,f0,fc,B,FB,CS,KK,xx,k,W0,W,EP
+        real::PE,dW1,tt,f,fmm,R1,R2,R,DC,W1,DQT,n
+        integer::i,t,nf,l
+        real,allocatable::RS(:),RG(:)
+        real::AA
+
+        KC=x(1)
+        fc=x(2)
+        B=x(3)
+        FB=0.01
+        kk=x(4)
+
+        allocate(RS(size(Q)),RG(size(Q)))
+        RS=0.0;RG=0.0
+        f0=y(1)+fc;W0=y(2);W=W0
+
+        do t=2,size(Q)
+
+            EP=E1(t)*KC;PE=P1(t)-EP
+            if (PE<0.0)PE=0.0
+
+            dW1=1.0;tt=W/f0                      
+            do while(dW1>0.05)
+              W1=fc*tt+1/kk*(1-exp(-kk*tt))*(f0-fc)
+              dW1=abs(W1-W)
+              f=f0-kk*(W1-fc*tt)
+              tt=tt+abs(W1-W)/f
+              if(tt>W/fc)then
+                tt=W/fc
+                exit
+              end if
+            end do
+            !f=B**2*(1-(1+A*W/B**2)**0.5)/W+A
+
+            f=f0-kk*(W-fc*tt)
+            !计算地表径流
+            if (abs(PE)>1E-5)then
+              if(PE>f)then
+                R2=PE-f
+              else
+                R2=0.0
+              end if
+            else
+              R2=0.0
+            end if
+            W=W+P1(t)-R2-EP
+
+            if(W<0.0)W=0.0
+            if(PE>0.0)then
+              R1=PE*FB
+            else
+              R1=0.0
+            end if           
+             RS(t)=R1+R2*(1.0-FB)          
+
+      end do
+      Output(:,1)=RS
+
+    end subroutine
+
+    !陕北汇流模型
+    subroutine SBModelRouting(RS,RI,RG,x,x1,Q1,QC)
+        implicit none
+        real::Q1,x1
+        real::RS(:),RI(:),RG(:),QC(:),x(:)
+        integer::i,j,t,NN
+        real::CS,n,k,xx
+        real,allocatable::QS(:),R(:)
+
+        CS=x(1)
+        n=x1
+        k=x(3)
+        xx=x(4)
+        NN=size(QC)
+        allocate(QS(NN),R(NN))
+        R=RS+RG+RI;QS(1)=Q1
+
+        do t=1,NN-1
+            QS(t+1)=CS*QS(t)+(1-CS)*R(t)*AA/3.6/periods
+        end do
+
+        call Muskingum(k,xx,n,QS,QC)
+    end subroutine
+
+    !分段马斯京根汇流
+   subroutine Muskingum(k,xx,n1,QS,QC)
+      implicit none
+      real::k,xx,xxl,C0,C1,C2,n1,kl,dt
+      integer::m,n,i,j,t,TT
+      real::QS(:),QC(:)
+      real,allocatable::CT(:),C(:)
+      real,allocatable::QCP(:),QC1(:,:),QC2(:),QC3(:)
+
+      n=floor(n1)
+      kl=k
+      dt=1.0
+      xxl=xx
+      C0=(0.5*dt-kl*xxl)/(0.5*dt+kl-kl*xxl)
+      C1=(0.5*dt+kl*xxl)/(0.5*dt+kl-kl*xxl)
+      C2=(-0.5*dt+kl-kl*xxl)/(0.5*dt+kl-kl*xxl) 
+      TT=size(QS)
+      
+       !河道汇流采用马斯京根法
+       allocate(QC1(TT,n+1))
+       QC1=Q(1);QC1(:,1)=QS
+       if(n>0)then
+
+           allocate(QC2(TT),QC3(TT))
+           QC3=0.0;QC2=QS
+           do i=1,n
+                do t=1,TT-1
+                    QC3(t+1)=C0*QC2(t+1)+C1*QC2(t)+C2*QC3(t)
+                end do
+                QC2=QC3
+           end do
+           QC=QC2
+       else
+           QC=QS
+       end if
+              
+    end subroutine Muskingum
+end module
+
+Program Main
+    Use Global
+    Use TICalucation
+    use Carlibration_SCE
+    Use TOPMDEL_SUB
+    Use Data_Output
+
+    Implicit None
+    Integer::szz,IS,i,N1,j,Iter
+    Real::X(7)
+    Real,Allocatable::QC(:),Up(:),Down(:),UpState(:),DownState(:)
+    Real::OFV
+    character(len=2000)::Column
+
+    Call Getcwd(Address)
+    !读入降水、蒸发、径流数据
+    filename=trim(Address)//'\配置文件\初始条件.txt'
+    open(10,file=filename)
+    read(10,*)CellSize
+    read(10,*)TCA_Th
+    read(10,*)TI_N
+    read(10,*)N_Isochrone
+    read(10,*)NF
+    read(10,*)Iter
+    close(10)
+
+    Call TICal(1)
+
+    Allocate(FloodCode(NF),FloodTime(NF+1))
+    Filename=Trim(Address)//'\配置文件\次洪编号.txt'
+    Open(10,File=Filename)
+    Do i=1,NF
+        Read(10,*)FloodCode(i)
+    End Do
+    Close(10)
+
+    FloodTime(1)=0
+    Do i=1,NF
+        Write(Column,'(I)')FloodCode(i)
+        Filename=Trim(Address)//'\配置文件\洪水\'//trim(adjustl(Column))//'.txt'
+        Open(10,File=Filename)
+        N1=GetFileN(10)-1;FloodTime(i+1)=FloodTime(i)+N1
+        Close(10)
+    End Do
+    TT=FloodTime(NF+1)
+
+    Allocate(Q(TT),P(TT),E(TT),QC(TT))
+    !读入降水、蒸发、径流数据
+    Do i=1,NF
+        Write(Column,'(I)')FloodCode(i)
+        Filename=Trim(Address)//'\配置文件\洪水\'//trim(adjustl(Column))//'.txt'
+        Open(10,File=Filename)
+        Read(10,*)
+        Do j=FloodTime(i)+1,FloodTime(i+1)
+            Read(10,*)Q(j),P(j),E(j)
+        End Do
+        Close(10)
+    End Do
+
+    !读入模型参数
+    Allocate(Up(9),Down(9),Xbest(9),Ybest(9))
+    filename=trim(Address)//'\配置文件\参数范围.txt'
+    open(10,file=filename)
+    do i=1,9
+      read(10,*)Down(i),Up(i)
+    end do
+    close(10)
+
+    Allocate(UpState(NF),DownState(NF))
+    UpState=1.0;DownState=0.0
+    Ybest=0.2
+
+    Do i=1,Iter      
+        Call SCE_UA(Up,Down,Xbest,OFV,QC,1)
+        Call SCE_UA(UpState,DownState,Ybest,OFV,QC,2)
+    End Do
+
+    Call TOPMODEL1(XBest,YBest,QC,OFV)
+
+    !结果输出
+    call DataOutput(QC)
+
+End Program
+
+module Data_Output
+    use global
+    implicit none
+
+    contains
+    !结果输出
+    subroutine DataOutput(QC)
+        implicit none
+        character(len=2000)::Number,Cline
+        real::QC(:)
+        integer::i,j,N1
+        
+        !输出最优产流参数
+        filename=trim(address)//'\结果\最优参数.txt'
+        open(10,file=filename)
+        do i=1,9
+            write(10,*)Xbest(i)
+        end do
+        close(10)
+
+
+        !输出每场洪水、每个雨量站对应的最优状态量
+        filename=trim(address)//'\结果\最优状态量.txt'
+        open(10,file=filename)        
+        do i=1,NF
+            write(10,*)Ybest(i)
+        end do
+        close(10)
+
+        !输出每场洪水的模拟结果
+        do i=1,NF
+            write(Number,"(I4)")i
+            filename=trim(Address)//'\结果\No_'//trim(adjustl(Number))//'.txt'
+            open(10,file=filename)
+            write(10,*)'实测值 模拟值'
+            do j=1,FloodTime(i+1)-FloodTime(i)
+               write(10,*)Q(FloodTime(i)+j),QC(FloodTime(i)+j)
+            end do
+            close(10)
+        end do
+
+    end subroutine
+end module
+
+module Carlibration_SCE
+    use global
+    use TOPMDEL_SUB
+    implicit none
+
+    contains
+    
+    !SCE-UA算法
+    subroutine SCE_UA(upbound,downbound,xx,OFV,QC,Key)
+        implicit none
+        !设置初始参数
+        integer::n,m,s,qq,o,alp,beta,dd,pp
+        integer::i,j,k,kk,SCE,cato,model,Key
+        real::rnd2,maxf,OFV
+        integer::sample,L0,t,sz,nf
+        real::upbound(:),downbound(:),QC(:),xx(:)
+        real,allocatable::rnd(:)
+        real,allocatable::x1(:,:)
+        real,allocatable::f(:)
+        real,allocatable::D(:,:)
+        real,allocatable::A(:,:,:)
+        real,allocatable::C(:,:)
+        real,allocatable::L(:)
+        integer,allocatable::Lx(:)
+        integer,allocatable::counts(:)
+        integer,allocatable::Cou(:)
+        real,allocatable::b(:,:)
+        real,allocatable::B0(:,:)
+        integer,allocatable::BF(:)
+        real,allocatable::center(:)
+        real,allocatable::Reflect(:)
+        real,allocatable::Up(:)
+        real,allocatable::Low(:)
+        real::f_Ref,f_Contra,min_n,threshold,mu,f_Mua
+        integer::min_l
+        real,allocatable::Contra(:)
+        real,allocatable::Mutation(:)
+        
+        n=size(upbound)             !待优化的参数个数
+        m=n+1                       !单纯形中点的个数
+        pp=2                         !单纯形的个数
+        s=m*pp                       !样本数
+        qq=3                       !每个子单纯形中点的个数
+        o=100                        !SCE-UA算法的执行次数
+        alp=1                       !父代产生的子代个数
+        beta=2*n+1                  !每个单纯形进化运算的步骤数
+        dd=1
+        allocate(rnd(n))    
+        allocate(x1(s,n+1))
+        allocate(D(s,n+1))
+        allocate(f(s))
+        allocate(counts(m))
+        allocate(A(m,n+1,pp))
+        allocate(C(m,n+1))
+        allocate(L(qq))
+        allocate(Cou(m))
+        allocate(b(qq,n+1))
+        allocate(B0(qq,n+1))
+        allocate(BF(qq))
+        allocate(center(n))
+        allocate(Reflect(n))
+        allocate(Up(n))
+        allocate(Low(n))
+        allocate(Contra(n))
+        allocate(Mutation(n))
+
+
+        !在合理的定义域内随机抽取s组参数组
+        call random_seed()
+        do i=1,s
+            call random_number(rnd)
+            x1(i,1:n)=rnd*(upbound-downbound)+downbound
+            if(Key==1)then
+                call TOPMODEL1(x1(i,1:n),Ybest,QC,OFV)
+            else
+                call TOPMODEL1(Xbest,x1(i,1:n),QC,OFV)
+            end if
+            f(i)=OFV
+            x1(i,n+1)=f(i)
+        end do
+                
+        !根据目标函数对参数组从大到小排序
+        D=x1
+        allocate(Lx(size(D,1)))
+        call sortrows(D,n+1,Lx)
+        counts(1)=m
+        do i=2,m
+            counts(i)=counts(i-1)+m-i+1
+        end do
+
+        !SCE-UA算法主体
+        do SCE=1,o
+            !根据目标函数对参数组从小到大排序
+            call sortrows(D,n+1,Lx)
+            !将s组参数组分配给pp个子矩阵
+            do i=1,pp
+                do j=1,m
+                    A(j,:,i)=D(i+pp*(j-1),:)
+                end do
+            end do
+            do i=1,Beta
+                do j=1,pp
+                    C=A(:,:,j)
+                    L=0
+                    Cou=counts
+                    !根据概率，从子矩阵中抽取qq个参数组
+                    do k=1,qq
+                        call random_number(rnd2)
+                        sample=ceiling(rnd2*maxval(Cou))
+                        L0=1
+                        do kk=1,m
+                            if (Cou(kk)>=sample) then
+                                L0=kk
+                                exit
+                            end if
+                        end do
+                        L(k)=L0
+                        do kk=1,m
+                            if (Cou(kk)>=sample) then
+                                Cou(kk)=Cou(kk)-(m-L(k)+1)
+                            end if
+                        end do
+                        b(k,:)=C(L(k),:)                   !把选取的q个点放于b中
+                    end do
+                    !单纯形优化
+                    do k=1,alp
+                        B0=b                               !调用sortrows后b会改变
+                        call sortrows(b,n+1,BF)
+                        center=(sum(B0(:,1:n),1)-B0(BF(qq),1:n))/(qq-1)   !算中心点
+                        Reflect=center+dd*(center-B0(BF(qq),1:n))         !算反射点
+                        Up=maxval(B0(:,1:n),1)
+                        Low=minval(B0(:,1:n),1)
+                        if ((.not. all(upbound>Reflect)) .or. (.not. all(Reflect>downbound))) then
+                            call random_number(rnd)
+                            Reflect=rnd*(Up-Low)+Low
+                        end if 
+
+                        if(Key==1)then
+                            call TOPMODEL1(Reflect,Ybest,QC,OFV)
+                        else
+                            call TOPMODEL1(Xbest,Reflect,QC,OFV)
+                        end if
+                                                                    
+                        f_Ref=OFV
+                        if (f_Ref<B0(BF(qq),n+1)) then
+                            B0(BF(qq),1:n)=Reflect
+                            B0(BF(qq),n+1)=f_Ref
+                        else
+                            Contra=center-(center-B0(BF(qq),1:n))*dd/2
+
+                            if(Key==1)then
+                                call TOPMODEL1(Contra,Ybest,QC,OFV)
+                            else
+                                call TOPMODEL1(Xbest,Contra,QC,OFV)
+                            end if
+
+                            f_Contra=OFV
+                            if (f_Contra<B0(BF(qq),n+1)) then
+                                B0(BF(qq),1:n)=Contra
+                                B0(BF(qq),n+1)=f_Contra
+                            else
+                                call random_number(rnd)
+                                Mutation=rnd*(Up-Low)+Low
+
+                                if(Key==1)then
+                                    call TOPMODEL1(Mutation,Ybest,QC,OFV)
+                                else
+                                    call TOPMODEL1(Xbest,Mutation,QC,OFV)
+                                end if     
+
+                                f_Mua=OFV
+                                B0(BF(qq),1:n)=Mutation
+                                B0(BF(qq),n+1)=f_Mua
+                            end if
+                        end if
+                        b=B0
+                    end do
+
+                    !返回到子矩阵
+                    do k=1,qq
+                        C(L(k),:)=b(k,:)
+                    end do 
+
+                    !排序
+                    call sortrows(C,n+1,Lx)
+                    A(:,:,j)=C
+                end do
+            end do
+
+            !将单纯形法的优化结果返回原矩阵D中
+            do i=1,pp
+                do j=1,m
+                    D(i+pp*(j-1),:)=A(j,:,i)
+                end do
+            end do
+            min_n=minval(D(:,n+1))
+            min_l=0
+            do i=1,n+1
+                min_l=min_l+1
+                if(min_n==D(i,n+1)) exit
+            end do
+            threshold=1-min_n
+            write(*,*)'SCE=',SCE
+            write(*,*)'OFV=',min_n
+        end do
+        xx=D(min_l,1:n);maxf=D(min_l,n+1)      
+               
+    end subroutine
+!--------------------------------------------------------------------------------------------!
+    !对矩阵以整行排序，从小到大
+    !D：需排序的矩阵；nn：排序参照的列；Lx：排序后各行原行号
+    !r0:矩阵行数；c0：矩阵列数
+    subroutine sortrows(D,nn,Lx)
+        implicit none
+        real::D(:,:)
+        integer::Lx(:)
+        integer::nn,r0,c0
+        integer::i,j
+        real,allocatable::temp(:)
+        real,allocatable::D_1(:,:)          
+        r0=size(D,1)
+        c0=size(D,2)
+        allocate(temp(c0))
+        allocate(D_1(r0,c0))
+        D_1=D                               !存储原始的数组D
+        do i=1,r0-1
+            do j=i+1,r0
+                if(D(i,nn)>D(j,nn))then
+                    temp=D(i,:)
+                    D(i,:)=D(j,:)
+                    D(j,:)=temp
+                end if
+            end do
+        end do
+        do i=1,r0
+            do j=1,r0
+                if (all(abs(D(i,:)-D_1(j,:))<1.0e-34))then
+                    Lx(i)=j
+                    exit
+                end if
+            end do
+        end do
+    end subroutine
+end module
+
+Module Global
+     Implicit None
+     Real,Allocatable,Save::Q(:),P(:),E(:),TIList(:,:),River_Length(:,:),Slope_Length(:,:)
+     Integer,Save::NT,Row,Col,TI_N,N_Isochrone,NF,TT
+     Real,Save::AA,TIMean,CellSize,TCA_Th
+     Character(len=20000),Save::Address,filename
+     Integer,Allocatable,Save::Pits(:,:),Mask(:,:),River(:,:)
+     Integer,Allocatable::FloodTime(:),FloodCode(:)
+     real,allocatable::Xbest(:),Ybest(:)
+
+     Contains
+     Integer Function GetDataN(cStr)
+        Character(Len =*),Intent(IN)::cStr
+        Integer::i
+        Logical::bIsSeparator,bIsQuote
+
+        GetDataN=0
+        bIsSeparator=.TRUE.
+        bIsQuote=.FALSE.
+        Do i=1,Len_Trim(cStr )
+            Select Case(cStr(i:i))
+            Case('"',"'") !// 如果遇到引号
+                If (.Not.bIsQuote) GetDataN=GetDataN+1  !//如果不在引号中，则增加一个数据
+                bIsQuote=.Not.bIsQuote !// 引号结束或开始
+                bIsSeparator=.FALSE.
+            Case(" ",",",char(9)) !// 如果遇到分隔符
+                If (.Not.bIsQuote) then  !// 分隔符如果不在引号中
+                    bIsSeparator=.TRUE.
+                End If
+            Case Default     
+                If (bIsSeparator) then
+                    GetDataN=GetDataN+1
+                End If
+                bIsSeparator=.FALSE.
+            End Select
+        End Do
+    End Function GetDataN
+   
+
+    Integer Function GetFileN(iFileUnit)
+    !// 此函数应在打开文件后立即调用。调用后读取位置返回文件起始位置
+        Implicit None
+        Integer,Intent(IN)::iFileUnit
+        character(Len=1)::cDummy
+        integer::ierr
+        GetFileN = 0
+        Rewind(iFileUnit)
+        Do
+            Read(iFileUnit,*,ioStat = ierr) cDummy
+            If( ierr /= 0 ) Exit
+            GetFileN=GetFileN+1
+        End Do
+        Rewind( iFileUnit )
+    End Function
+
+    Integer Function Number(N1,N2,Label)
+         Implicit None
+         Integer::N1,N2,N,SL,i
+         Integer::Label(:,:)
+
+         SL=size(Label(:,1))
+         Do i=1,SL
+             If(abs(Label(i,1)-N1)<1E-5)then
+                 If(abs(Label(i,2)-N2)<1E-5)then
+                     Number=i
+                     exit
+                 End If
+             End If
+         End Do
+    End Function   
+    
+    !转化，cell总编号与计算编号
+    Subroutine Trans(N,N1)
+        Implicit None
+        Integer::N,N1,N2
+        Real::S
+        
+        If((N<=Col).OR.(N>=Col*(Row-1)).OR.(MOD(N,Col)==0).OR.(MOD(N,Col)==1))Then
+            N1=0
+        Else 
+            N2=N/Col
+            N1=N-Col-2*(N2-1)-1
+        End If
+    End Subroutine  
+
+    !转化，cell计算编号与总编号
+    Subroutine Trans1(N,N2)
+        Implicit None
+        Integer::N,N1,N2
+        
+        N1=N/(Col-2)
+        If(MOD(N,Col-2)==0)N1=N1-1
+        N2=Col+N+(N1+1)*2-1
+    End Subroutine
+End Module
+
+Module TOPMDEL_SUB
+     Use Global
+     Implicit None
+
+     Contains
+     Subroutine TOPMODEL1(X,Y,QC,OFV)
+         Implicit None
+         Real::X(:),Y(:),QC(:)
+         Real::OFV,DC,DWT,DQT
+         Real,Allocatable::maxQ(:),maxQC(:),DW(:)
+         Integer::i
+
+         Allocate(maxQ(NF),maxQC(NF),DW(NF))
+         Do i=1,NF
+             Call TOMODEL(X,Y(i),P(FloodTime(i)+1:FloodTime(i+1)),E(FloodTime(i)+1:FloodTime(i+1)),Q(FloodTime(i)+1:FloodTime(i+1)),QC(FloodTime(i)+1:FloodTime(i+1)))
+         End Do
+
+        !模拟结果的目标函数计算
+        do i=1,NF
+            maxQ(i)=maxval(Q(FloodTime(i)+1:FloodTime(i+1)))
+            maxQC(i)=maxval(QC(FloodTime(i)+1:FloodTime(i+1)))
+            DW(i)=abs(sum(QC(FloodTime(i)+1:FloodTime(i+1)))-sum(Q(FloodTime(i)+1:FloodTime(i+1))))/sum(Q(FloodTime(i)+1:FloodTime(i+1)))
+        end do
+        DC=1-(sum((Q-QC)**2.0))/(sum((Q-sum(Q)/size(Q))**2.0))
+        DQT=sum(abs(maxQ-maxQC)/maxQ)/NF
+        DWT=sum(DW)/NF
+       !  OFV=0.5*DQT+(1-DC)+0.5*DWT  !DQT为洪峰相对误差      DWT为相对洪量
+         OFV=(1-DC)+0.5*DQT
+     End Subroutine
+
+
+     Subroutine TOMODEL(X,Y,P1,E1,Q1,QC)
+         Implicit None
+         Real::X(:),QC(:),P1(:),E1(:),Q1(:)
+         Real::Srmax,Td,m,T0,B,Rv,CHv,k,xx,Y,nn
+         Integer::NL
+         Integer::t,i,j
+         Real::Q0,TI0,QvT,QfT,Srz0,D1,EA,EP,Qb
+         Real,Allocatable::D(:),Qv(:),Qf(:),QT(:),Suz(:),Srz(:),Sr(:),EX(:),QQ(:)
+       
+         Srmax=X(1)
+         Td=X(2)
+         m=X(3)
+         T0=X(4)         
+         Rv=X(5)
+         CHv=X(6)
+         nn=X(7)
+         k=X(8)
+         xx=X(9)
+         B=Y
+         Allocate(D(TI_N),Qv(TI_N),Qf(TI_N),QT(size(P1)),QQ(size(P1)),Suz(TI_N),Srz(TI_N),Sr(TI_N),EX(TI_N))
+    
+         Srz0=Srmax*B
+         Q0=T0*exp(-TIMean)*AA*1000000.0/3600.0;D1=-m*Alog(Q1(1)/Q0);Srz=Srz0;Sr=Srmax-Srz;Suz=0.0
+         
+         !TOMPDEL产流
+         Do t=1,size(P1)   
+                        
+             QvT=0.0;Qf=0.0;QfT=0.0;EX=0.0
+             Do i=1,TI_N
+                 D(i)=D1-m*(TIList(i,1)-TIMean)
+                 If(D(i)<0.0)D(i)=0.0
+
+                 Srz(i)=Srz(i)-P1(t)
+                 If(Srz(i)<0.0)Then
+                     Suz(i)=Suz(i)-Srz(i);Srz(i)=0.0
+                 End If
+
+                 If(Suz(i)>D(i))Then
+                     EX(i)=Suz(i)-D(i);Suz(i)=D(i)
+                 End If
+
+                 !地下水补给
+                 If(D(i)>0.0)Then
+                     Qv(i)=Suz(i)/D(i)/Td
+                     If(Qv(i)>Suz(i))Qv(i)=Suz(i)
+                     Suz(i)=Suz(i)-Qv(i);
+                     If(Suz(i)<0.0000001)Suz(i)=0.0
+                      QvT=QvT+Qv(i)*TIList(i,2)    !地下水补给总量计算
+                 End If
+
+                 !蒸散发计算
+                 If(E1(t)>0.0)Then
+                     EA=E1(t)*(1-Srz(i)/Srmax)
+                     If(EA>(Srmax-Srz(i)))EA=Srmax-Srz(i)
+                     Srz(i)=Srz(i)+EA
+                 End If
+
+                 !地表产流
+                 If(i>1)Then
+                     If(EX(i)>0.0)Then
+                         Qf(i)=TIList(i,2)*(EX(i-1)+EX(i))/2.0
+                     Else
+                         If(EX(i-1)>0.0)Then
+                             Qf(i)=TIList(i,2)*EX(i-1)/2.0
+                         End If
+                     End If
+                 End If
+                 QfT=QfT+Qf(i)  !地表产流总量计算           
+                         
+             End Do
+
+             Qb=Q0*exp(-D1/m)*3600.0/AA/1000000.0        !壤中流
+             D1=D1-(QvT-Qb)                              !调整地下水位均值        
+             QT(t)=QfT+Qb                                !总产流量
+              
+         End Do
+         QT=QT*AA*1000000.0/3600.0
+         !TOMPDEL汇流，采用等流时线
+         Call TOPMODEL_Routing(QT,Rv,CHv,Q1,QQ)
+         Call Muskingum(k,xx,nn,QQ,QC)
+
+     End Subroutine
+
+     Subroutine TOPMODEL_Routing(QT,Rv,CHv,Q1,QQ)
+         !TOMPDEL汇流，采用等流时线
+         Implicit None
+         Real::QT(:),QQ(:),Q1(:)
+         Real::Rv,CHv,LMAX
+         Real,Allocatable::Isochrone(:),Isochrone1(:),QCC(:),QT1(:),Tm(:)
+         Integer::m,i,j,N,N1
+
+         m=N_Isochrone
+         Allocate(Tm(m))
+         Tm=0.0;NT=size(Q1)
+         Tm(1)=RL(1)/CHv
+         Do i=2,m
+             Tm(i)=Tm(1)+(RL(i)-RL(1))/Rv
+         End Do
+
+         !等流时线计算
+         N=Ceiling(Tm(m))
+         Allocate(Isochrone(N),Isochrone1(N),QCC(NT+2*N),QT1(N+NT))
+         Isochrone1=0.0
+         If(N==1)Then
+             Isochrone1=1.0
+         Else
+             Do i=1,N        
+                 Do j=2,m
+                     If((i*1.0-1E-10<Tm(j)).AND.(i*1.0-1E-10>Tm(j-1)))Then                            
+                         Isochrone1(i)=RA(j-1)+(i*1.0-Tm(j-1))*(RA(j)-RA(j-1))/(Tm(j)-Tm(j-1))
+                     End If
+                 End Do
+             End Do
+         End If
+         Isochrone1(N)=1.0
+         Isochrone(1)=Isochrone1(1)
+         Do i=2,N
+             Isochrone(i)=Isochrone1(i)-Isochrone1(i-1)
+         End Do
+
+         QCC=Q1(1);QT1=0.0;QT1(N+1:N+NT)=QT
+         Do i=N+1,NT+N
+             QCC(i+1:i+N)=QCC(i+1:i+N)+QT1(i)*Isochrone*AA/3600.0
+         End Do
+         QQ=QCC(N+1:NT+N)
+     End Subroutine
+
+   !分段马斯京根汇流
+   subroutine Muskingum(k,xx,n1,QS,QC)
+      implicit none
+      real::k,xx,xxl,C0,C1,C2,n1,kl,dt
+      integer::m,n,i,j,t,TT
+      real::QS(:),QC(:)
+      real,allocatable::CT(:),C(:)
+      real,allocatable::QCP(:),QC1(:,:),QC2(:),QC3(:)
+
+      n=floor(n1)
+      kl=k
+      dt=1.0
+      xxl=xx
+      C0=(0.5*dt-kl*xxl)/(0.5*dt+kl-kl*xxl)
+      C1=(0.5*dt+kl*xxl)/(0.5*dt+kl-kl*xxl)
+      C2=(-0.5*dt+kl-kl*xxl)/(0.5*dt+kl-kl*xxl) 
+      NT=size(QS)
+      
+       !河道汇流采用马斯京根法
+       allocate(QC1(NT,n+1))
+       QC1=Q(1);QC1(:,1)=QS
+       if(n>0)then
+
+           allocate(QC2(NT),QC3(NT))
+           QC3=0.0;QC2=QS
+           do i=1,n
+                do t=1,NT-1
+                    QC3(t+1)=C0*QC2(t+1)+C1*QC2(t)+C2*QC3(t)
+                end do
+                QC2=QC3
+           end do
+           QC=QC2
+       else
+
+           QC=QS
+       end if
+
+       NT=1
+       
+    end subroutine
+
+
+End Module
+
+
+Module Isochrone_SUB
+    Use Global
+    Implicit None
+
+    Contains
+    Subroutine Isochrone_Length(DEM,W,W1,L,L1)
+        !计算每个网格到流域出口的汇流长度，为等流时线法提供数据，采用的是D8算法
+        Implicit None
+        Character(len=2000)::filename,cLine,Number1,Number2
+        Real::DEM(:,:)
+        Integer::W(:,:),W1(:,:),L(:,:),L1(:,:)
+        Integer::i,j,k,N1,N2,N3,N4,N5,N6,N7,NN
+        Integer,Allocatable::Dout(:,:),TC(:,:),TD(:,:)
+        Real,Allocatable::Dout_Length(:,:),Total_Length(:,:)
+        Real::LocalSlope(8)
+        Real::Zc,Z1,ss
+        Integer::a(1)
+        Character(len=4)::Column
+
+        Allocate(TC(Row,Col),TD(Row,Col),Dout(Row,Col),Dout_Length(Row,Col),Slope_Length(Row,Col),River_Length(Row,Col),Total_Length(Row,Col))
+        
+        Dout=0;N3=0;Dout_Length=0.0;Slope_Length=0.0;River_Length=0.0
+        Do i=2,Row-1
+            Do j=2,Col-1
+                If(Mask(i,j)/=0)Then
+                    Do k=1,8
+                        Zc=DEM(i,j)
+                        N1=W1(L1(i,j),k+1)
+                        Z1=DEM(L(N1,1),L(N1,2))
+                        If((k==1).OR.(k==3).OR.(k==6).OR.(k==8))Then
+                            LocalSlope(k)=(Zc-Z1)*1.0/2.0**0.5
+                        Else
+                            LocalSlope(k)=Zc-Z1
+                        End If
+                    End Do
+                    a=maxloc(LocalSlope)
+                    If(LocalSlope(a(1))>-1E-10)Then
+                        Dout(i,j)=W1(L1(i,j),a(1)+1)
+                        n1=Dout(i,j)
+                        If((a(1)==1).OR.(a(1)==3).OR.(a(1)==6).OR.(a(1)==8))Then
+                            Dout_Length(i,j)=CellSize*2.0**0.5
+                        Else
+                            Dout_Length(i,j)=CellSize
+                        End If
+                    Else
+                        Pits(i,j)=1
+                    End If
+                End If
+           End Do
+        End Do
+
+        Do i=1,(Row-2)*(Col-2)
+            TD=0;TC=0;N2=1
+            Call Trans1(i,NN)
+            TC(L(NN,1),L(NN,2))=1
+            If((Mask(L(NN,1),L(NN,2))/=0).AND.(Pits(L(N1,1),L(N1,2))/=1))Then
+                N1=NN
+                Do While(N2==1)
+                    N3=L(N1,1);N4=L(N1,2);N1=Dout(N3,N4);TD(L(N1,1),L(N1,2))=1
+                    If(River(L(N1,1),L(N1,2))==1)Then
+                         River_Length(L(NN,1),L(NN,2))=River_Length(L(NN,1),L(NN,2))+Dout_Length(L(N1,1),L(N1,2))
+                    Else
+                         Slope_Length(L(NN,1),L(NN,2))=Slope_Length(L(NN,1),L(NN,2))+Dout_Length(L(N1,1),L(N1,2))
+                    End If
+                    If((Mask(L(N1,1),L(N1,2))==0).OR.(Pits(L(N1,1),L(N1,2))==1))Exit              
+                End Do
+            End If
+        End Do
+        Total_Length=River_Length+Slope_Length
+
+    End Subroutine
+
+End Module
+
+Module TICalucation
+    Use Global
+    Use Isochrone_SUB
+    Implicit None
+
+    Contains
+    Subroutine TICal(NN)
+        !采用FD8_Qiunn算法计算每个网格地形指数TI
+        Implicit None
+        Character(len=20000)::Cline
+        character(len=20)::Column
+        Real,Allocatable::DEM(:,:),TI(:,:),TCA(:,:)
+        Integer::i,N,j,M,NN
+        Integer,Allocatable::Label(:,:),Label1(:,:),Window(:,:),Window1(:,:)
+        Real::MTI
+        
+        !输入流域DEM
+        Call getcwd(Address)
+        Filename=Trim(Address)//'\配置文件\DEM.txt'   
+        Open(10,file=Filename)
+        Row=GetFileN(10)
+        Do i=1,Row
+            Read(10,'(a20000)') cLine
+            Col=GetDataN(trim(adjustl(cLine)))
+        End Do
+        Row=Row+2;Col=Col+2
+        Allocate(DEM(Row,Col))
+        rewind(10)
+        Do i=1,Row-2
+            Read(10,*)DEM(i+1,2:Col-1)
+        End Do
+        Close(10)
+
+        !输入流域掩膜
+        Filename=Trim(Address)//'\配置文件\Mask.txt' 
+        Open(10,file=filename)
+        Allocate(Mask(Row,Col))
+        Mask=0
+        Do i=1,Row-2
+            Read(10,*)Mask(i+1,2:Col-1)
+        End Do
+        Close(10)
+
+        Allocate(Label(Row*Col,2))
+        Allocate(Label1(Row,Col))
+        Label=0;Label1=0;N=0
+        Do i=1,Row
+            Do j=1,Col
+                N=N+1;Label(N,:)=(/i,j/);Label1(i,j)=N
+            End Do
+        End Do
+
+        !确定每个网格周围8个网格的位置 
+        Allocate(Window((Row-2)*(Col-2),9))
+        Allocate(Window1(Row*Col,9))
+        Window=0;Window1=0;N=0;M=0
+        Do i=1,Row
+            Do j=1,Col            
+                M=M+1
+                If((i>1).And.(j>1).And.(i<Row).And.(j<Col))Then
+                    N=N+1
+                    Window(N,:)=(/Label1(i,j),Label1(i-1,j-1),Label1(i-1,j),Label1(i-1,j+1),Label1(i,j-1),Label1(i,j+1),Label1(i+1,j-1),Label1(i+1,j),Label1(i+1,j+1)/)
+                    Window1(M,:)=Window(N,:)
+                End If
+            End Do
+        End Do
+
+        !寻找流域内凹陷点
+        Allocate(Pits(Row,Col),TI(Row,Col))
+        Call FindPits(DEM,Pits)
+        Allocate(River(Row,Col),TCA(Row,Col))
+        River=0
+
+        !FD8_Qiunn算法
+        Call MFD_Quinn(DEM,Window,Window1,Label,Label1,TI,TCA)
+        TI=TI*Mask;TCA=TCA*Mask
+
+        do i=1,Row
+            do j=1,Col
+                if(TI(i,j)<0.0)TI(i,j)=1.0
+            end do
+        end do
+
+
+        River=0;MTI=0.0
+        Do i=2,Row
+            Do j=2,Col
+                If(TCA(i,j)>TCA_Th)River(i,j)=1
+                If(MTI<TI(i,j).AND.(River(i,j)==0))MTI=TI(i,j)
+            End Do
+        End Do
+
+        TI=TI*(1-River)+River*MTI
+        Call Isochrone_Length(DEM,Window,Window1,Label,Label1)  
+                
+        filename=trim(Address)//'\结果\地形指数.txt'
+        open(20,file=filename)
+        Write(Column,'(I)')Col+2
+        Cline='('//trim(adjustl(column))//'f)'
+        do i=1,Row
+             write(20,Cline)TI(i,:)
+        end do
+        close(20)
+
+        filename=trim(Address)//'\结果\TCA.txt'
+        open(20,file=filename)
+        do i=1,Row
+             write(20,Cline)TCA(i,:)
+        end do
+        close(20)
+
+        filename=trim(Address)//'\结果\River.txt'
+        open(20,file=filename)
+        Cline='('//trim(adjustl(column))//'I)'
+        do i=1,Row
+             write(20,Cline)River(i,:)
+        end do
+        close(20)
+
+        filename=trim(Address)//'\结果\Slope_Length.txt'
+        open(20,file=filename)
+        Cline='('//trim(adjustl(column))//'f)'
+        do i=1,Row
+             write(20,Cline)Slope_Length(i,:)
+        end do
+        close(20)
+
+        !计算TI并分类
+        Call TIDealing(TI)
+        filename=trim(Address)//'\结果\River_Length.txt'
+        open(20,file=filename)
+        Cline='('//trim(adjustl(column))//'f)'
+        do i=1,Row
+             write(20,Cline)River_Length(i,:)
+        end do
+        close(20)
+    End Subroutine
+
+    Subroutine FindPits(DEM,Pits)
+        !寻找流域内凹陷点
+        Implicit None
+        Real::DEM(:,:)
+        Integer::Pits(:,:)
+        Integer::i,j,N
+
+        Pits=0
+        Do i=2,Row
+            Do j=2,Col
+                If(Mask(i,j)==1)Then
+                    N=0
+                    If(DEM(i,j)<(DEM(i+1,j)+1E-10))N=N+1
+                    If(DEM(i,j)<(DEM(i+1,j+1)+1E-10))N=N+1
+                    If(DEM(i,j)<(DEM(i+1,j-1)+1E-10))N=N+1
+                    If(DEM(i,j)<(DEM(i,j+1)+1E-10))N=N+1
+                    If(DEM(i,j)<(DEM(i,j-1)+1E-10))N=N+1
+                    If(DEM(i,j)<(DEM(i-1,j-1)+1E-10))N=N+1
+                    If(DEM(i,j)<(DEM(i-1,j)+1E-10))N=N+1
+                    If(DEM(i,j)<(DEM(i-1,j+1)+1E-10))N=N+1
+                    If(N==8)Pits(i,j)=1
+                End If
+            End Do
+        End Do
+
+    End Subroutine
+
+    Subroutine MFD_Quinn(DEM,W,W1,L,L1,TI,TCA)
+        !FD8_Qiunn算法
+        Implicit None
+        Character(len=2000)::cLine,Number1,Number2
+        Real::DEM(:,:),TI(:,:),TCA(:,:)
+        Integer::W(:,:),W1(:,:),L(:,:),L1(:,:)
+        Integer::i,j,k,N1,N2,N,N3
+        Integer,Allocatable::CountN(:,:),CountN1(:,:)
+        Real,Allocatable::Slope(:,:,:),LenCounter(:,:),DEM_Slope(:,:)
+        Real::LocalSlope(8),LengthCell(8)
+        Real::Zc,Z1,le,p,AA,h,SS
+        Character(len=4)::Column
+        Real::Time_end1,Time_end2
+
+        AA=(Row*1.0-2.0)*(Col*1.0-2.0);h=1.0
+        Allocate(Slope(Row,Col,8))
+        Allocate(CountN(Row,Col))
+        Allocate(LenCounter(Row,Col))
+        Allocate(CountN1(Row,Col))
+        Allocate(DEM_Slope(Row,Col))
+        Slope=0;CountN=0;LenCounter=1.0;DEM_Slope=0.0
+        LengthCell=(/0.354,0.5,0.354,0.5,0.5,0.354,0.5,0.354/)
+        Do i=2,Row-1
+            Do j=2,Col-1
+                If((Mask(i,j)/=0).AND.(Pits(i,j)/=1))Then
+                    Do k=1,8
+                        Zc=DEM(i,j);N1=W1(L1(i,j),k+1);Z1=DEM(L(N1,1),L(N1,2))
+                        If((k==1).OR.(k==3).OR.(k==6).OR.(k==8))Then
+                            LocalSlope(k)=(Zc-Z1)*1.0/2.0**0.5/CellSize
+                        Else
+                            LocalSlope(k)=(Zc-Z1)/CellSize
+                        End If
+                        If(LocalSlope(k)<0.0)LocalSlope(k)=0.0
+                        Call Trans(N1,N2)
+                        If((LocalSlope(k)>0.0).And.(N2/=0).And.(Mask(L(N1,1),L(N1,2))/=0))Then
+                            CountN(L(N1,1),L(N1,2))=CountN(L(N1,1),L(N1,2))+1
+                        End If   
+                    End Do
+                    Slope(i,j,:)=LocalSlope
+                    N2=0
+                    Do N1=1,8
+                        If(LocalSlope(N1)>0.0)N2=N2+1
+                    End Do
+                    DEM_Slope(i,j)=SUM(LocalSlope*LengthCell)/(N2*1.0)
+                End If
+           End Do
+        End Do
+
+        N1=1;TCA=1.0;N2=0;CountN1=1;TI=0.0
+        CountN1(1,:)=0;CountN1(Row,:)=0;CountN1(:,1)=0;CountN1(:,Col)=0
+        CountN1=CountN1*Mask;CountN1=CountN1*(1-Pits)
+        Do While(N1>0)
+            N1=0
+            Do i=2,Row-1
+               Do j=2,Col-1
+                   If((CountN(i,j)==0).AND.(CountN1(i,j)==1))Then
+                       LocalSlope=Slope(i,j,:);LocalSlope=LocalSlope**((TCA(i,j)/AA+1.0)**h)
+                       LocalSlope=LocalSlope/sum(LocalSlope)
+                       Slope(i,j,:)=LocalSlope*LengthCell/sum(LocalSlope*LengthCell)
+                       LocalSlope=Slope(i,j,:)
+                       Do k=1,8
+                           If((Slope(i,j,k)>0.0).And.(Pits(i,j)/=1))Then
+                               N1=W1(L1(i,j),k+1)
+                               TCA(L(N1,1),L(N1,2))=TCA(L(N1,1),L(N1,2))+Slope(i,j,k)*TCA(i,j)
+                               CountN(L(N1,1),L(N1,2))=CountN(L(N1,1),L(N1,2))-1
+                           End If                       
+                       End Do
+                       N1=1;N2=N2+1;CountN1(i,j)=0
+                       TI(i,j)=LOG(TCA(i,j)/DEM_Slope(i,j))
+                       Exit
+                   End If
+               End Do
+            End Do
+        End Do
+
+    End Subroutine
+
+
+    Subroutine TIDealing(TI)
+        Implicit None
+        Real::TI(:,:)
+        Integer::i,j,N,NMID
+        Real::Total,TIMAX,TIMIN,TIMID
+        Real::a(1)
+        Real,Allocatable::TIValid(:),TIBound(:),TIValid1(:)
+        Integer::b(1)
+        
+        Allocate(TIList(TI_N,2))
+        Total=0.0;N=0
+        Do i=2,Row-1
+            Do j=2,Col-1
+                If(Mask(i,j)==1)Then
+                    Total=Total+TI(i,j);N=N+1
+                End If
+            End Do       
+        End Do
+        TIMean=Total/(N*1.0)
+
+        Allocate(TIValid(N),TIValid1(N))
+        N=0
+        Do i=2,Row-1
+            Do j=2,Col-1
+                If(Mask(i,j)==1)Then
+                    N=N+1;TIValid(N)=TI(i,j)
+                End If
+            End Do       
+        End Do
+        a=MAXVAL(TIValid);TIMAX=a(1);a=MINVAL(TIValid);TIMIN=a(1)
+        Allocate(TIBound(TI_N+1))
+        TIBound(1)=TIMIN
+        
+        Do i=1,N
+            a=MINVAL(TIValid);TIValid1(i)=a(1);b=MINLOC(TIValid);TIValid(b(1))=TIMAX+1.0
+        End Do      
+        TIMID=TIValid1(Ceiling(N*1.0/3*1.0));NMID=Ceiling(TI_N*1.0/2*1.0)
+
+        Do i=2,TIMID+1
+            TIBound(i)=TIBound(i-1)+(TIMID-TIMIN)/TIMID
+        End Do
+
+        Do i=TIMID+2,TI_N+1
+            TIBound(i)=TIBound(i-1)+(TIMAX-TIMID)/(TI_N-TIMID)
+        End Do
+
+        TIValid=TIValid1;TIList=0.0;AA=N*CellSize*CellSize
+        Do i=1,N
+            Do j=1,TI_N
+                If((TIValid(i)>TIBound(j)-1E-9).AND.(TIValid(i)<TIBound(j+1)+1E-9))Then
+                    TIList(j,1)=TIList(j,1)+TIValid(i);TIList(j,2)=TIList(j,2)+1.0
+                    Exit
+                End If
+            End Do
+        End Do
+
+        Do i=1,TI_N
+            TIList(i,1)=TIList(i,1)/TIList(i,2);TIList(i,2)=TIList(i,2)/(N*1.0)
+        End Do
+
+    End Subroutine
+End Module
+
+program main
+  use Global
+  use suba
+  implicit none
+
+  character(len=2000)::address,filename
+  integer::szz,nf,i,pp,cato
+  integer,allocatable::tf(:)
+  real,allocatable::QCC(:)
+
+  call getcwd(Address)
+  filename=trim(Address)//"/需设置文件/初始条件.txt"
+  open(10,file=filename)
+  read(10,*)nf     !洪水总场次
+  read(10,*)pp     !自回归修正阶数
+  read(10,*)cato   !否存在常数项
+  close(10)
+
+  allocate(tf(nf+1))
+  tf(1)=0
+  filename=trim(Address)//"/需设置文件/次洪时间.txt"
+  open(10,file=filename,status="old")
+  read(10,*)
+  read(10,*)tf(2:nf+1)
+  close(10)
+
+  filename=trim(Address)//'/需设置文件/data.txt'
+  call readdata(filename,szz,Q,QC)
+  allocate(QCC(szz))
+
+  call Realtimecorrect(Q,QC,nf,tf,QCC,pp,cato)   !调用实时校正子程序
+
+  !输出实时校正结果
+  filename=trim(Address)//"/结果/实时校正结果.txt"
+  open(30,file=filename)
+  write(30,*)"实测流量 模拟流量 实时校正结果"
+  do i=1,szz
+     write(30,"(3f10.3)")Q(i),QC(i),QCC(i)
+  end do
+  close(30)
+end program
+
+!全局变量模块
+module global
+    implicit none
+
+    real,allocatable,save::Q(:)           !实测流量
+    real,allocatable,save::QC(:)          !模拟结果
+
+    contains
+      subroutine readdata(filename,sz,Q,QC)
+        implicit none
+        character(len=2000)::filename
+        character(len=2000)::buffer
+        logical::alive
+        integer::status,sz,i
+        real,allocatable::Q(:),QC(:)
+
+        sz=0
+       !读取txt数据文件
+        inquire(file=filename,exist=alive)
+        if(alive)then
+	        open(10,file=filename,access="sequential",status="old")
+	        do while(.true.)			!若用DVF编译，则txt文件的末行需加回车
+		       read(10,"(A2000)",iostat=status)buffer
+		       if(status/=0)exit
+		       sz=sz+1
+	       end do
+        else
+	       write(*,*)TRIM(filename),"不存在。"
+           stop
+        end if
+        sz=sz-1
+        !将数据读入数组中
+        allocate(Q(sz))
+        allocate(QC(sz))
+        rewind(10)
+        read(10,*)
+        do i=1,sz
+	       read(10,*)Q(i),QC(i)
+        end do
+        close(10)
+
+     end subroutine
+end module
+
+module suba
+    use global
+    implicit none
+    contains
+
+    !最小二乘法实时校正子程序
+    subroutine Realtimecorrect(Q,QC,nf,tf,QCC,pp,cato)
+        implicit none
+        real::QC(:),Q(:)
+        real,allocatable::ec(:),x(:,:),c(:,:),d(:,:),b(:,:),y(:,:),ecc(:),QCC(:),ee(:)
+        integer::nf,pp,i,t,n,nn,j,cato
+        integer::tf(:)
+
+        allocate(c(pp,pp))
+        allocate(b(pp,pp))
+        allocate(ec(pp))
+        allocate(x(pp,pp))
+        allocate(y(pp,pp))
+        allocate(ecc(pp))
+        allocate(d(pp,pp))
+        allocate(ee(pp))
+
+        if (abs(cato-2)<1E-5)then
+
+        !不存在常数项的情况
+          do i=1,nf
+            n=tf(i+1)-tf(i)
+            deallocate(ee,ec,x,y,ecc,d)
+            allocate(ec(n))
+            allocate(x(n-pp,pp),y(n-pp,1),ecc(n),d(pp,1),ee(pp))
+
+            ec=Q(tf(i)+1:tf(i+1))-QC(tf(i)+1:tf(i+1))  !实测值与预测值误差计算
+
+            do j=1,n-pp
+               x(j,:)=ec(j+pp-1:j:-1)
+            end do
+
+            !矩阵运算，用来确定AR模型的系数
+            y(:,1)=ec(pp+1:n)
+            c=matmul(transpose(x),x)
+            call nizhen(c,b,pp)
+            d=matmul(b,matmul(transpose(x),y))
+
+            ecc=(/(0,i=1,n)/)
+            
+            do j=pp+1,n
+              ee=ec(j-pp:j-1)
+              ecc(j)=sum(ee*d(:,1))
+            end do
+
+            !预测值+AR模型计算出来的误差
+            QCC(tf(i)+1:tf(i+1))=QC(tf(i)+1:tf(i+1))+ecc
+          end do
+
+        else
+
+          !存在常数项的情况
+          do i=1,nf
+            n=tf(i+1)-tf(i)
+            deallocate(ee,ec,x,y,ecc,d)
+            allocate(ec(n),x(n-pp+1,pp),y(n-pp+1,1),ecc(n),d(pp,1),ee(pp))
+
+            ec=Q(tf(i)+1:tf(i+1))-QC(tf(i)+1:tf(i+1))
+
+            do j=1,n-pp+1
+               x(j,2:pp)=ec(j+pp-2:j:-1)
+            end do
+            x(:,1)=1
+
+            y(:,1)=ec(pp:n)
+            c=matmul(transpose(x),x)
+            call nizhen(c,b,pp)
+            d=matmul(b,matmul(transpose(x),y))
+
+            !矩阵运算，用来确定AR模型的系数
+            ecc=(/(0,i=1,n)/)
+            do j=pp,n
+              ee(2:pp)=ec(j-pp+1:j-1)
+              ee(1)=1          !因为存在常数项，所以需要加这一项
+              ecc(j)=sum(ee*d(:,1))
+            end do
+
+            !预测值+AR模型计算出来的误差
+            QCC(tf(i)+1:tf(i+1))=QC(tf(i)+1:tf(i+1))+ecc
+          end do
+        endif
+     end subroutine
+
+!-------------------------矩阵求逆-----------------------------------  
+! aa为原矩阵，b为存放aa的逆矩阵，n为矩阵aa的维数   
+    subroutine nizhen(aa,bb,n)
+      implicit none
+      integer,intent(in)::n
+      real,dimension(n,n),intent(in):: aa
+      real,dimension(n,n),intent(out):: bb
+      real,dimension(n,2*n)::a
+      real,dimension(2*n)::c
+      real,dimension(n,n)::ln  !单位矩阵
+      integer::i,j,kk,k
+      real::temp1
+
+      a=0.
+      ln=0.
+      bb=9999.
+      do i=1,n
+          a(i,1:n)=aa(i,:)
+          a(i,n+i)=1.
+          ln(i,i)=1.
+      enddo
+   
+     outer:do i=1,n   !列 或 行 
+         temp1=a(i,i)
+         kk=i
+       !-----------------选择某一列中最小的非0值，并与i行互换
+     if(i<n)  then
+       do j=i+1,n  !行
+           if(temp1==0)  then
+              temp1=a(j,i)
+              kk=j
+           else
+              if(abs(a(j,i))<abs(temp1).and.abs(a(j,i))/=0.)   then
+                 temp1=a(j,i)
+                 kk=j
+              endif
+           endif
+       enddo
+      if(kk/=i) then
+          c=a(i,:)
+          a(i,:)=a(kk,:)
+          a(kk,:)=c
+      endif
+    endif
+    
+    !------------------------------------ 消元
+     a(i,:)=a(i,:)/a(i,i)
+     
+     do k=1,n   !-----行
+         if(i/=k) then
+             a(k,:)=a(k,:)-a(i,:)*a(k,i)
+         endif
+     enddo
+   enddo outer
+ 
+   do i=1,n
+       do j=1,n
+          if(i/=j)  then
+            if(a(i,j)/=0.) then
+               write(*,*) '该矩阵不可逆！'
+               goto 1000
+            endif
+          else
+            if(a(i,j)==0.) then 
+               write(*,*) '该矩阵不可逆！'
+               goto 1000
+            endif
+          endif
+      enddo
+   enddo
+   
+   do i=1,n
+       bb(i,:)=a(i,n+1:2*n) 
+   enddo
+
+   1000 continue
+     
+   end subroutine
+end module 
