@@ -11,6 +11,7 @@ def run_XAJ():
     FloodTime = np.zeros(shape=(NT, NP))
     QCE = np.zeros(NT)
     for i in range(NP):
+        print(f'===================Subcatchment {i}===================')
         RSS, RII, RGG = \
         runoff_production(P[:, i], E, S0, FR0, im, WDM, WUM, WLM, SM, b, EX, kc, C, KI,  KG, WU, WL, WD)
         

@@ -75,13 +75,13 @@ def routing(Q_obs, NT, CS, CI, CG, L, n, C0, C1, C2, periods, RI, RG, RS, AA):
         np.zeros(NT), np.zeros(NT), np.zeros(NT)
     QG[0] = Q_obs[0]
     QQ[0] = Q_obs[0]
-    
+    print('------------Run slope_runoff--------------')
     QS, QI, QG = slope_runoff(QS, QI, QG, RS, RI, RG, CI, CG, AA, periods, NT)
 
     QT = QS + QI + QG
-
+    print('------------Run network_runoff--------------')
     QQ = network_runoff(NT, L, QQ, QT, CS)
-
+    print('------------Run muskingum--------------')
     QC = muskingum(Q_obs[0], QQ, n, C0, C1, C2)
     
     return QC

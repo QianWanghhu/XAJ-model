@@ -11,7 +11,7 @@ def read_inputs(fn):
     print('================Load the required input data===============')
     data_inputs = pd.read_csv(fn)
     rain_col = [col for col in data_inputs.columns if 'P' in col]
-    
+
     P, E, Q_obs = data_inputs.loc[:, rain_col].values, \
         data_inputs.loc[:, 'E'].values, data_inputs.loc[:, 'Q'].values
 
