@@ -3,6 +3,21 @@ import numpy as np
 import json
 import pandas as pd
 
+# prepare input data
+def read_inputs(fn):
+    """
+    Read the input of P, E
+    """
+    print('================Load the required input data===============')
+    data_inputs = pd.read_csv(fn)
+    rain_col = [col for col in data_inputs.columns if 'P' in col]
+    
+    P, E, Q_obs = data_inputs.loc[:, rain_col].values, \
+        data_inputs.loc[:, 'E'].values, data_inputs.loc[:, 'Q'].values
+
+    return P, E, Q_obs
+
+
 def read_parms(f_parms, f_initials):
     print('================Load the required parameters===============')
     user_parms = json.load(open(f_parms, 'rb')) # f'../data/input_parms.json'
@@ -280,7 +295,8 @@ def runoff_production(P, E, S0, FR0, im, WDM, WUM, WLM, SM, b, EX, kc, C, KI,  K
         RII[t] = RI
         RGG[t] = RG
 
-    return RSS, RII, RGG, e_list, WU1, WL1, WD1, R_list, Rb_list
+    return RSS, RII, RGG
+    #e_list, WU1, WL1, WD1, R_list, Rb_list
     # END runoff_production()
 
 def save_runoff(P, E, f_parms, f_initials, runoff_file):
